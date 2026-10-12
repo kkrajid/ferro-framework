@@ -1,0 +1,15 @@
+[package]
+name = "ferro-router"
+description = "Path pattern parser and segment-trie router for the Ferro framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferro-core.workspace = true
+percent-encoding.workspace = true
+
+[lints]
+workspace = true

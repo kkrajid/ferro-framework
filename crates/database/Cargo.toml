@@ -1,0 +1,14 @@
+[package]
+name = "ferro-database"
+description = "Database values, statements, errors and the backend trait for the Ferro ORM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-channel.workspace = true
+
+[lints]
+workspace = true

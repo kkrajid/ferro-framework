@@ -1,0 +1,11 @@
+# Caddy obtains and renews certificates automatically and forwards to Ferro.
+# Docker Compose: upstream web:8000; a single server: 127.0.0.1:8000.
+{$DOMAIN:example.com} {
+	encode zstd gzip
+	reverse_proxy web:8000 {
+		# Caddy sets X-Forwarded-For / X-Forwarded-Proto; Ferro trusts them from
+		# FERRO_TRUSTED_PROXIES only.
+		health_uri /readyz
+		health_interval 5s
+	}
+}

@@ -1,0 +1,22 @@
+[package]
+name = "ferro-postgres"
+description = "PostgreSQL backend for the Ferro ORM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ferro-database.workspace = true
+async-channel.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tokio-postgres.workspace = true
+tokio-postgres-rustls.workspace = true
+webpki-roots.workspace = true
+
+[lints]
+workspace = true

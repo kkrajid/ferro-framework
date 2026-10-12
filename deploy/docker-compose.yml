@@ -1,0 +1,54 @@
+# Ferro + PostgreSQL + Caddy (automatic HTTPS). Copy to the project root with Dockerfile and
+# Caddyfile, set DOMAIN and POSTGRES_PASSWORD in .env, then:
+#   docker compose up -d db && docker compose run --rm web ferro migrate && docker compose up -d
+services:
+  web:
+    build: .
+    environment:
+      FERRO_DATABASE_URL: postgresql://shop:${POSTGRES_PASSWORD}@db:5432/shop
+      FERRO_PROCESSES: "2"
+      FERRO_TRUSTED_PROXIES: 172.16.0.0/12      # Docker networks: Caddy's address
+      FERRO_HSTS: "1"
+      FERRO_METRICS: "1"
+      FERRO_METRICS_ALLOW: 172.16.0.0/12        # a Prometheus container on this network
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 45s                    # > shutdown_drain (5) + shutdown_timeout (30)
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: shop
+      POSTGRES_DB: shop
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shop"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

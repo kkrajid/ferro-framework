@@ -1,0 +1,37 @@
+# systemd unit for a Ferro project in /srv/shop (virtual environment in /srv/shop/.venv).
+# Install: sudo cp ferro.service /etc/systemd/system/shop.service && sudo systemctl enable --now shop
+[Unit]
+Description=Shop (Ferro)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=ferro
+Group=ferro
+WorkingDirectory=/srv/shop
+# FERRO_DATABASE_URL and other settings; readable by root and the service user only.
+EnvironmentFile=/srv/shop/.env
+ExecStart=/srv/shop/.venv/bin/ferro run --host 127.0.0.1 --port 8000 --processes 4 --shutdown-drain 5 --log-format json
+# SIGTERM: drain 5 s, then finish requests within shutdown_timeout (30 s).
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=2
+
+# Sandboxing
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/shop
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+# Serving TLS on port 443 directly (--tls-cert/--tls-key): uncomment.
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

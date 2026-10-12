@@ -1,0 +1,17 @@
+[package]
+name = "ferro-shared"
+description = "State shared by the worker processes of one Ferro server (rate limits)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+memmap2.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

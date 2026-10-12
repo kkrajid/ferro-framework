@@ -1,0 +1,84 @@
+# A Ferro project on Kubernetes: migration Job, Deployment, Service.
+# kubectl create secret generic shop-db --from-literal=url='postgresql://shop:...@postgres:5432/shop?sslmode=require'
+# kubectl apply -f kubernetes.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shop-migrate
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: registry.example.com/shop:1.0.0
+          command: ["ferro", "migrate"]
+          env:
+            - name: FERRO_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: shop-db, key: url }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: shop }
+  template:
+    metadata:
+      labels: { app: shop }
+    spec:
+      terminationGracePeriodSeconds: 45   # > shutdown_drain (5) + shutdown_timeout (30)
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+      containers:
+        - name: web
+          image: registry.example.com/shop:1.0.0
+          args: ["ferro", "run", "--host", "0.0.0.0", "--port", "8000", "--processes", "1",
+                 "--shutdown-drain", "5", "--log-format", "json"]
+          ports:
+            - containerPort: 8000
+          env:
+            - name: FERRO_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: shop-db, key: url }
+            - name: FERRO_TRUSTED_PROXIES
+              value: "10.0.0.0/8"            # the ingress controller's pod network
+            - name: FERRO_METRICS
+              value: "1"
+            - name: FERRO_METRICS_ALLOW
+              value: "10.0.0.0/8"
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8000 }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8000 }
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 250m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shop
+spec:
+  selector: { app: shop }
+  ports:
+    - port: 80
+      targetPort: 8000

@@ -1,0 +1,39 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.pdb
+*.so
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Tooling
+.idea/
+.vscode/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+
+# Local databases
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# Local assistant tooling (not part of the project)
+.claude/
+.specify/integrations/
+.specify/init-options.json
+.specify/integration.json

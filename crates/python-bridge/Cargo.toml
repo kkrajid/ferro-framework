@@ -1,0 +1,36 @@
+[package]
+name = "ferro-python"
+description = "Python bindings (ferro._ferro) for the Ferro framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "_ferro"
+crate-type = ["cdylib", "rlib"]
+# The test harness would need a Python runtime to load; the native module is tested from pytest.
+test = false
+doctest = false
+
+[dependencies]
+ferro-core.workspace = true
+ferro-router.workspace = true
+ferro-http.workspace = true
+ferro-shared.workspace = true
+ferro-database.workspace = true
+ferro-orm.workspace = true
+ferro-sqlite.workspace = true
+ferro-postgres.workspace = true
+ferro-migrations.workspace = true
+bytes.workspace = true
+percent-encoding.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
