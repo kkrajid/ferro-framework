@@ -214,12 +214,18 @@ def serve(
     listening socket handed over by the multi-process supervisor (Feature 010).
     """
     runner = ServerRunner(app, settings, listener=listener, shared_dir=shared_dir)
-    host, port = runner.start()
+    # Before starting: a stop request during startup (e.g. right after a deploy) must end the
+    # process cleanly, not through the signal's default action.
+    _install_signal_handlers()
+    try:
+        host, port = runner.start()
+    except (KeyboardInterrupt, _Shutdown):
+        runner.close()
+        return 0
     if banner is not None:
         shown_host = f"[{host}]" if ":" in host else host
         url = f"{settings.scheme}://{shown_host}:{port}"
         print(banner.format(url=url), file=sys.stderr, flush=True)
-    _install_signal_handlers()
     try:
         try:
             while not runner.wait(_WAIT_SLICE):

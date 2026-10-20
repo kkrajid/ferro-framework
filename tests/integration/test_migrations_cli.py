@@ -84,5 +84,6 @@ def test_server_warns_about_unapplied_migrations(ferro_cli, tmp_path):
     cli("makemigrations", cwd=tmp_path)
     server = ferro_cli("run", "--port", "0", "--database-url", "sqlite:///app.db", cwd=tmp_path)
     server.wait_for(r"1 unapplied migration\(s\): 0001_initial")
+    server.wait_for(r"serving app:app")
     server.terminate()
     assert server.finish() == 0

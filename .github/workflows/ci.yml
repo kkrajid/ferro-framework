@@ -38,9 +38,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-about@0.9.2
-      - run: cargo about generate --locked -c about.toml -m crates/python-bridge/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES.txt
+      - run: cargo about generate --locked -c about.toml -m crates/python-bridge/Cargo.toml about.hbs -o generated.txt
       - name: THIRD-PARTY-LICENSES.txt matches Cargo.lock (regenerate with the command in about.toml)
-        run: git diff --exit-code THIRD-PARTY-LICENSES.txt
+        shell: bash
+        run: |
+          if ! diff -u <(tr -d '\r' < THIRD-PARTY-LICENSES.txt) <(tr -d '\r' < generated.txt) > licences.diff; then
+            echo "::error title=THIRD-PARTY-LICENSES.txt is out of date::$(head -60 licences.diff | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit 1
+          fi
 
   python:
     name: Python ${{ matrix.python }} (${{ matrix.os }})
