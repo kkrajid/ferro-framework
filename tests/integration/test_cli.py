@@ -165,9 +165,11 @@ def test_access_log_line(ferro_cli):
 
 def test_graceful_shutdown_completes_in_flight_requests(ferro_cli, tmp_path):
     (tmp_path / "app.py").write_text(
-        "import asyncio\nfrom ferro import App\napp = App()\n\n"
+        "import asyncio\nfrom ferro import App\napp = App()\nstarted = 0\n\n"
         "@app.get('/slow')\nasync def slow():\n"
-        "    await asyncio.sleep(2)\n    return {'done': True}\n"
+        "    global started\n    started += 1\n"
+        "    await asyncio.sleep(2)\n    return {'done': True}\n\n"
+        "@app.get('/started')\nasync def count():\n    return {'started': started}\n"
     )
     server = ferro_cli("run", "--port", "0", "--workers", "4", cwd=tmp_path)
     results: list[int] = []
@@ -181,7 +183,12 @@ def test_graceful_shutdown_completes_in_flight_requests(ferro_cli, tmp_path):
     threads = [threading.Thread(target=call) for _ in range(50)]
     for thread in threads:
         thread.start()
-    time.sleep(0.5)
+    # Stop only once every request is in a handler (slow CI machines take a while to connect).
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if httpx.get(f"{server.base_url}/started", timeout=5).json()["started"] == 50:
+            break
+        time.sleep(0.05)
     server.terminate()
     for thread in threads:
         thread.join(30)
