@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ferro import _ferro
 from ferro.exceptions import HTTPException
 from ferro.models.exceptions import TransactionError
-from ferro.models.expressions import Aggregate, Q
+from ferro.models.expressions import Aggregate, Expression, Q, Value
 from ferro.models.relations import prefetch_related_objects
 
 if TYPE_CHECKING:
@@ -89,10 +89,28 @@ class QuerySet[M: Model]:
         """Loads any relation (reverse keys, many-to-many) with one extra query per level."""
         return self._clone(self._query, self._prefetch + paths)
 
-    def annotate(self, *positional: Aggregate, **aggregates: Aggregate) -> QuerySet[M]:
-        """Adds aggregate values: per record over relations (``Count("items")``), or per group
-        after ``values()``."""
-        return self._clone(self._query.annotate(_aggregate_specs(positional, aggregates)))
+    def annotate(self, *positional: Aggregate, **annotations: Any) -> QuerySet[M]:
+        """Adds computed values: aggregates per record over relations (``Count("items")``) or
+        per group after ``values()``, and per-row expressions (``Lower("name")``,
+        ``Case(...)``, ``Exists(...)``, ``F("price") * 2``)."""
+        query = self._query
+        if positional:
+            query = query.annotate(_aggregate_specs(positional, {}))
+        for name, value in annotations.items():
+            if isinstance(value, Aggregate):
+                query = query.annotate(_aggregate_specs((), {name: value}))
+            else:
+                expression = value if isinstance(value, Expression) else Value(value)
+                query = query.annotate_expr(name, expression._ferro_expr())
+        return self._clone(query)
+
+    def distinct(self) -> QuerySet[M]:
+        """Leaves out duplicate rows (``values()`` over a relation, joins of ``order_by``)."""
+        return self._clone(self._query.distinct())
+
+    def none(self) -> QuerySet[M]:
+        """A queryset that matches nothing."""
+        return self.filter(pk__in=[])
 
     def values(self, *fields: str) -> QuerySet[M]:
         """Rows as dicts of the named fields (all fields when none are named)."""
@@ -268,6 +286,95 @@ class QuerySet[M: Model]:
     def sql(self) -> tuple[str, list[Any]]:
         """The SELECT this queryset runs, as ``(sql, params)``; values are never in the text."""
         return self._query.sql()
+
+    async def explain(self) -> str:
+        """The database's plan for this query (``EXPLAIN``; SQLite: ``EXPLAIN QUERY PLAN``)."""
+        return await self._query.explain()
+
+    async def raw(self, sql: str, params: Iterable[Any] = ()) -> list[M]:
+        """Instances from hand-written SQL that selects every column of the model; other
+        columns become attributes. ``%s`` marks each parameter (``%%`` a literal ``%``)::
+
+            await Product.objects.raw("SELECT * FROM product WHERE price > %s", [100])
+
+        Never format values into ``sql``: pass them in ``params``.
+        """
+        return await _ferro.raw_fetch(sql, list(params), self.model._meta)
+
+    async def in_bulk(
+        self, id_list: Iterable[Any] | None = None, *, field_name: str = "pk"
+    ) -> dict[Any, M]:
+        """``{key: record}`` for the given keys (all records when ``id_list`` is None);
+        ``field_name`` must be unique."""
+        if field_name != "pk" and not getattr(self.model._fields.get(field_name), "unique", False):
+            raise ValueError(f"in_bulk(): field '{field_name}' is not unique")
+        if id_list is None:
+            found = await self
+        else:
+            keys = list(dict.fromkeys(id_list))
+            if not keys:
+                return {}
+            found = await self.filter(**{f"{field_name}__in": keys})
+        attribute = "pk" if field_name == "pk" else field_name
+        return {getattr(item, attribute): item for item in found}
+
+    def _create_values(self, lookups: dict[str, Any], defaults: dict[str, Any] | None) -> dict:
+        values = {key: value for key, value in lookups.items() if "__" not in key}
+        if "pk" in values:
+            values[self.model._meta.pk_name] = values.pop("pk")
+        for key, value in (defaults or {}).items():
+            values[key] = value() if callable(value) else value
+        return values
+
+    async def get_or_create(
+        self, defaults: dict[str, Any] | None = None, **lookups: Any
+    ) -> tuple[M, bool]:
+        """``(record, False)`` when one matches ``lookups``, else ``(new record, True)``
+        created from the exact lookups and ``defaults``. A concurrent create of the same unique
+        record returns that record instead of failing."""
+        from ferro.db import transaction
+        from ferro.models.exceptions import IntegrityError
+
+        try:
+            return await self.get(**lookups), False
+        except self.model.DoesNotExist:
+            pass
+        try:
+            async with transaction():  # a savepoint inside an outer transaction
+                return await self.create(**self._create_values(lookups, defaults)), True
+        except IntegrityError:
+            try:
+                return await self.get(**lookups), False
+            except self.model.DoesNotExist:
+                pass
+            raise
+
+    async def update_or_create(
+        self,
+        defaults: dict[str, Any] | None = None,
+        create_defaults: dict[str, Any] | None = None,
+        **lookups: Any,
+    ) -> tuple[M, bool]:
+        """Updates the record matching ``lookups`` with ``defaults`` (locking it first), or
+        creates one from the lookups and ``create_defaults`` (``defaults`` when not given).
+        Returns ``(record, created)``."""
+        from ferro.db import transaction
+        from ferro.models.exceptions import IntegrityError
+
+        async with transaction():
+            try:
+                record = await self.select_for_update().get(**lookups)
+            except self.model.DoesNotExist:
+                initial = create_defaults if create_defaults is not None else defaults
+                try:
+                    async with transaction():
+                        return await self.create(**self._create_values(lookups, initial)), True
+                except IntegrityError:
+                    record = await self.select_for_update().get(**lookups)
+            for key, value in (defaults or {}).items():
+                setattr(record, key, value() if callable(value) else value)
+            await record.save()
+            return record, False
 
     async def get(self, *conditions: Q, **lookups: Any) -> M:
         """The single matching record; ``DoesNotExist`` / ``MultipleObjectsReturned`` otherwise."""

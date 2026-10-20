@@ -60,6 +60,14 @@ pub struct Settings {
     pub rate_limit: Option<String>,
     pub hsts: bool,
     pub hsts_max_age: u64,
+    /// `includeSubDomains` in the HSTS header (Feature 023; on by default, as before).
+    pub hsts_include_subdomains: bool,
+    /// `preload` in the HSTS header: asks browsers' preload lists to include the domain.
+    pub hsts_preload: bool,
+    /// Host names this site answers to (`example.com`, `.example.com`, `*`); empty: any.
+    pub allowed_hosts: Vec<String>,
+    /// Redirect plain-HTTP requests (as reported by a trusted proxy) to HTTPS.
+    pub https_redirect: bool,
     pub content_security_policy: Option<String>,
     pub cors: Option<CorsSettings>,
     /// Liveness probe address; empty disables it (Feature 011).
@@ -111,6 +119,10 @@ impl Default for Settings {
             rate_limit: None,
             hsts: false,
             hsts_max_age: 31_536_000,
+            hsts_include_subdomains: true,
+            hsts_preload: false,
+            allowed_hosts: Vec::new(),
+            https_redirect: false,
             content_security_policy: None,
             cors: None,
             health_path: "/healthz".to_string(),

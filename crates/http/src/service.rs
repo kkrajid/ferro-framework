@@ -181,6 +181,19 @@ pub(crate) async fn handle(
         );
         return http;
     }
+    if let Some(response) = site_check(&req, &state, &request_id) {
+        let status = response.status;
+        let http = into_http(response, &request_id, false, &state.policy);
+        tracing::info!(
+            target: "ferro.access",
+            method = %req.method(),
+            path = %req.uri().path(),
+            status = status,
+            request_id = %request_id,
+            client = %client.map(|a| a.ip().to_string()).unwrap_or_default(),
+        );
+        return http;
+    }
     let in_flight = state.lifecycle.enter();
     let origin = header(&req, "origin");
     let (reply, close, route_id) = match preflight(&req, &state, &request_id, origin) {
@@ -231,6 +244,41 @@ pub(crate) async fn handle(
     }
     in_flight.complete();
     http
+}
+
+/// Refuses a `Host` outside `allowed_hosts` (400) and redirects plain HTTP to HTTPS when
+/// `https_redirect` is on (308, keeping the method and body). Probes and metrics come earlier,
+/// so load balancers can reach them by address (Feature 023).
+fn site_check(req: &HttpRequest, state: &State, request_id: &str) -> Option<FerroResponse> {
+    if !state.policy.host_allowed(host(req)) {
+        tracing::warn!(
+            target: "ferro.security",
+            host = %host(req).unwrap_or_default(),
+            request_id = %request_id,
+            "request refused: its Host is not in allowed_hosts",
+        );
+        return Some(
+            ErrorEnvelope::new(400, request_id)
+                .with_message("Invalid Host header")
+                .into_response(),
+        );
+    }
+    if state.tls {
+        return None;
+    }
+    let scheme = state.policy.scheme(
+        req.peer_addr().map(|a| a.ip()),
+        header(req, "x-forwarded-proto"),
+    );
+    let path_and_query = req.uri().path_and_query().map_or("/", |p| p.as_str());
+    let location = state
+        .policy
+        .https_location(scheme, host(req), path_and_query)?;
+    Some(
+        FerroResponse::new(308)
+            .with_header("location", location)
+            .with_header("cache-control", "no-store"),
+    )
 }
 
 /// Liveness and readiness, answered without dispatching (no Python, middleware, rate limit or

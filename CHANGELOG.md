@@ -20,6 +20,29 @@ Follow-up review of Features 018–020 ([docs/security-audit.md](docs/security-a
 
 ### Added
 
+- Signals and hooks (Feature 024): `ferro.signals` (`Signal`, `receiver`, `pre_save`,
+  `post_save`, `pre_delete`, `post_delete`, `m2m_changed`, `request_started`,
+  `request_finished`, `got_request_exception`, `user_logged_in`, `user_logged_out`,
+  `user_login_failed`, `post_migrate`), `db.on_commit()`, `@app.on_startup` and
+  `@app.on_shutdown`.
+- Site security settings (Feature 023), from Django's security guide: `allowed_hosts`
+  (other `Host` headers get 400; `ferro run` warns when it is unset), `https_redirect` (308
+  to HTTPS behind a proxy), `hsts_include_subdomains` and `hsts_preload`.
+- Failed logins are throttled: `authenticate()` raises `LoginThrottled` (429) after 5 failures
+  per username (and client address, with the new `request` argument) for 15 minutes;
+  `app.add_auth(max_login_attempts=..., login_lockout=...)`.
+- ORM completeness (Feature 022), from a comparison with Django's "Making queries":
+  - Lookups `istartswith`, `iendswith`, `range`, `regex`, `iregex`; `__in` with a queryset.
+  - Date transforms: `__year`, `__quarter`, `__month`, `__day`, `__week_day`, `__hour`,
+    `__minute`, `__second`, `__date` (UTC), combinable with lookups.
+  - JSON queries: key paths (`profile__address__city`), `has_key`, `has_keys`,
+    `has_any_keys`, `contains` (containment, also on SQLite).
+  - Expressions in `annotate()`: `Value`, `Lower`, `Upper`, `Trim`, `Length`, `Abs`,
+    `Concat`, `Coalesce`, `Greatest`, `Least`, `Now`, `Case`/`When`, `Subquery`, `Exists`,
+    `OuterRef`; `F() % n`; `Q ^ Q`.
+  - `QuerySet.distinct()`, `none()`, `get_or_create()`, `update_or_create()`, `in_bulk()`,
+    `explain()`, `raw()`; `db.execute()` and `db.fetch()` for parameterized SQL.
+  - Reverse foreign-key managers: `add()`, `remove()`, `clear()`, `set()`.
 - Database completeness (Feature 021), from a comparison with Django's database reference:
   - `transaction(isolation="read committed" | "repeatable read" | "serializable")`.
   - `QuerySet.iterator(chunk_size=1000)`: async iteration in chunks (keyset pagination on the

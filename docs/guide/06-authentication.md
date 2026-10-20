@@ -56,7 +56,7 @@ from ferro.auth import authenticate
 @app.post("/login", rate_limit="5/minute")
 async def sign_in(request):
     data = await request.json()
-    user = await authenticate(data.get("username", ""), data.get("password", ""))
+    user = await authenticate(data.get("username", ""), data.get("password", ""), request)
     if user is None:                                  # unknown user, wrong password or inactive
         raise HTTPException(401, "Wrong username or password")
     await auth.login(request, user)
@@ -73,6 +73,14 @@ async def sign_out(request):
 - `login` starts a new session with a new key (the old key stops working: session fixation
   protection) and keeps the visitor's session data.
 - Always rate-limit login routes (`rate_limit="5/minute"`).
+- **Failed logins are throttled**: after 5 failures for a username (from one client address,
+  when you pass `request`) within 15 minutes, `authenticate` raises `LoginThrottled` — answered
+  `429` with `Retry-After` unless you catch it — even for the right password, until the 15
+  minutes pass. Unknown usernames count the same way. A successful login resets the count.
+  Change it with `app.add_auth(max_login_attempts=10, login_lockout=600)`
+  (`max_login_attempts=0` turns it off). Counts live in the [cache](08-cache.md): use the
+  database backend with `--processes` so all processes share them. Without `request`, the count
+  is per username only, which lets anyone lock a known username out for the lockout period.
 
 ## request.user and request.session
 

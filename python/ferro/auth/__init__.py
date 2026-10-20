@@ -26,11 +26,12 @@ from ferro.auth.permissions import (
     permission_required,
     staff_required,
 )
-from ferro.auth.sessions import auth_middleware, authenticate, login, logout
+from ferro.auth.sessions import LoginThrottled, auth_middleware, authenticate, login, logout
 
 __all__ = [
     "AnonymousUser",
     "Group",
+    "LoginThrottled",
     "PasswordError",
     "Permission",
     "Session",

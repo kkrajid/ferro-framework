@@ -8,12 +8,12 @@ use ferro_database::{Statement, Value};
 
 use crate::error::OrmError;
 use crate::field::{FieldKind, FieldMeta};
-use crate::lookup::Lookup;
+use crate::lookup::{DatePart, JsonKey, Lookup, Transform};
 use crate::meta::ModelMeta;
 use crate::path::{FieldPath, Hop};
 use crate::query::{
-    AggFunc, Aggregate, Annotation, Condition, Expr, Lock, Node, Operand, OrderTarget, Query,
-    Selected, Target,
+    AggFunc, Aggregate, Annotation, AnnotationValue, Condition, Expr, Func, Lock, Node, Operand,
+    OrderTarget, Query, Selected, Target,
 };
 
 /// Database-specific SQL spelling. Adding PostgreSQL (Feature 003) means one more implementation.
@@ -43,6 +43,19 @@ pub trait Dialect: Send + Sync + Debug {
 
     /// Clause used when a query has an offset but no limit.
     fn offset_only(&self, placeholder: &str) -> String;
+
+    /// `column`'s value (of `kind`) reduced to a date part (`__year`, `__date`, ...; Feature
+    /// 022). Date-times are read in UTC.
+    fn date_part(&self, column: &str, part: DatePart, kind: &FieldKind) -> String;
+
+    /// A regular-expression match of `column` against `placeholder`, plus the pattern to bind.
+    fn regex_lookup(
+        &self,
+        column: &str,
+        placeholder: &str,
+        pattern: &str,
+        insensitive: bool,
+    ) -> (String, Value);
 
     /// Row-locking clause ending a `select_for_update()` query on `table` (quoted). SQLite has
     /// none: its transactions hold the database write lock from their start.
@@ -128,6 +141,8 @@ impl Dialect for SqliteDialect {
         match lookup {
             Lookup::IExact => like(like_escape(value)),
             Lookup::IContains => like(format!("%{}%", like_escape(value))),
+            Lookup::IStartsWith => like(format!("{}%", like_escape(value))),
+            Lookup::IEndsWith => like(format!("%{}", like_escape(value))),
             Lookup::Contains => glob(format!("*{}*", glob_escape(value))),
             Lookup::StartsWith => glob(format!("{}*", glob_escape(value))),
             Lookup::EndsWith => glob(format!("*{}", glob_escape(value))),
@@ -137,6 +152,41 @@ impl Dialect for SqliteDialect {
 
     fn offset_only(&self, placeholder: &str) -> String {
         format!(" LIMIT -1 OFFSET {placeholder}")
+    }
+
+    fn date_part(&self, column: &str, part: DatePart, _kind: &FieldKind) -> String {
+        // Stored date-times are UTC text already.
+        let number = |format: &str| format!("CAST(strftime('{format}', {column}) AS INTEGER)");
+        match part {
+            DatePart::Year => number("%Y"),
+            DatePart::Quarter => format!("(({} + 2) / 3)", number("%m")),
+            DatePart::Month => number("%m"),
+            DatePart::Day => number("%d"),
+            DatePart::WeekDay => format!("({} + 1)", number("%w")),
+            DatePart::Hour => number("%H"),
+            DatePart::Minute => number("%M"),
+            DatePart::Second => number("%S"),
+            DatePart::Date => format!("date({column})"),
+        }
+    }
+
+    fn regex_lookup(
+        &self,
+        column: &str,
+        placeholder: &str,
+        pattern: &str,
+        insensitive: bool,
+    ) -> (String, Value) {
+        // REGEXP calls the `regexp` function each connection registers (Rust's regex syntax).
+        let pattern = if insensitive {
+            format!("(?i){pattern}")
+        } else {
+            pattern.to_string()
+        };
+        (
+            format!("{column} REGEXP {placeholder}"),
+            Value::Text(pattern),
+        )
     }
 }
 
@@ -187,6 +237,8 @@ impl Dialect for PostgresDialect {
         let (operator, pattern) = match lookup {
             Lookup::IExact => ("ILIKE", like_escape(value)),
             Lookup::IContains => ("ILIKE", format!("%{}%", like_escape(value))),
+            Lookup::IStartsWith => ("ILIKE", format!("{}%", like_escape(value))),
+            Lookup::IEndsWith => ("ILIKE", format!("%{}", like_escape(value))),
             Lookup::Contains => ("LIKE", format!("%{}%", like_escape(value))),
             Lookup::StartsWith => ("LIKE", format!("{}%", like_escape(value))),
             Lookup::EndsWith => ("LIKE", format!("%{}", like_escape(value))),
@@ -200,6 +252,42 @@ impl Dialect for PostgresDialect {
 
     fn offset_only(&self, placeholder: &str) -> String {
         format!(" OFFSET {placeholder}")
+    }
+
+    fn date_part(&self, column: &str, part: DatePart, kind: &FieldKind) -> String {
+        // EXTRACT reads timestamptz in the session's time zone; Ferro's date-times are UTC.
+        let utc = format!("({column} AT TIME ZONE 'UTC')");
+        let column = if *kind == FieldKind::DateTime {
+            utc.as_str()
+        } else {
+            column
+        };
+        let number = |unit: &str| format!("CAST(EXTRACT({unit} FROM {column}) AS integer)");
+        match part {
+            DatePart::Year => number("YEAR"),
+            DatePart::Quarter => number("QUARTER"),
+            DatePart::Month => number("MONTH"),
+            DatePart::Day => number("DAY"),
+            DatePart::WeekDay => format!("({} + 1)", number("DOW")),
+            DatePart::Hour => number("HOUR"),
+            DatePart::Minute => number("MINUTE"),
+            DatePart::Second => format!("CAST(FLOOR(EXTRACT(SECOND FROM {column})) AS integer)"),
+            DatePart::Date => format!("CAST({column} AS date)"),
+        }
+    }
+
+    fn regex_lookup(
+        &self,
+        column: &str,
+        placeholder: &str,
+        pattern: &str,
+        insensitive: bool,
+    ) -> (String, Value) {
+        let operator = if insensitive { "~*" } else { "~" };
+        (
+            format!("{column} {operator} {placeholder}"),
+            Value::Text(pattern.to_string()),
+        )
     }
 
     fn lock_clause(&self, table: &str, lock: Lock) -> String {
@@ -221,6 +309,8 @@ struct Sql<'d> {
     text: String,
     params: Vec<Value>,
     aliases: usize,
+    /// Scopes of the queries enclosing the subquery being written (`OuterRef` targets).
+    outer: Vec<Scope>,
 }
 
 impl<'d> Sql<'d> {
@@ -230,6 +320,7 @@ impl<'d> Sql<'d> {
             text: String::with_capacity(128),
             params: Vec::new(),
             aliases: 0,
+            outer: Vec::new(),
         }
     }
 
@@ -245,6 +336,18 @@ impl<'d> Sql<'d> {
         let placeholder = self.next_placeholder();
         self.text.push_str(&placeholder);
         self.params.push(value);
+    }
+
+    /// Adds a parameter and returns its placeholder without writing it; the caller writes the
+    /// returned text next, before binding anything else, so placeholders stay in order.
+    fn param(&mut self, value: Value) -> String {
+        let placeholder = self.next_placeholder();
+        self.params.push(value);
+        placeholder
+    }
+
+    fn postgres(&self) -> bool {
+        self.dialect.name() == "postgresql"
     }
 
     fn quote(&self, identifier: &str) -> String {
@@ -502,7 +605,14 @@ fn finish_aggregate(sql: &mut Sql<'_>, aggregate: &Aggregate) {
 /// joined rows of a group.
 fn write_annotation(sql: &mut Sql<'_>, ctx: &Ctx<'_>, index: usize) {
     let annotation = &ctx.query.annotations[index];
-    let aggregate = &annotation.aggregate;
+    let aggregate = match &annotation.value {
+        AnnotationValue::Aggregate(aggregate) => aggregate,
+        AnnotationValue::Expr(expr, _) => {
+            let scope = ctx.root.clone();
+            write_value_expr(sql, Some(ctx), &scope, expr);
+            return;
+        }
+    };
     if annotation.grouped {
         let column = aggregate.path.as_ref().map(|p| ctx.field_column(sql, p));
         write_aggregate_call(sql, aggregate, column.as_deref());
@@ -537,7 +647,13 @@ fn write_annotation(sql: &mut Sql<'_>, ctx: &Ctx<'_>, index: usize) {
 }
 
 fn nullable_annotation(annotation: &Annotation) -> bool {
-    annotation.aggregate.func != AggFunc::Count && annotation.aggregate.default.is_none()
+    match &annotation.value {
+        AnnotationValue::Aggregate(aggregate) => {
+            aggregate.func != AggFunc::Count && aggregate.default.is_none()
+        }
+        AnnotationValue::Expr(Expr::Exists(_), _) => false,
+        AnnotationValue::Expr(..) => true,
+    }
 }
 
 /// Where a leaf's compared value comes from.
@@ -554,20 +670,146 @@ fn write_column(sql: &mut Sql<'_>, ctx: &Ctx<'_>, column: &Column) {
 }
 
 fn write_expr(sql: &mut Sql<'_>, scope: &Scope, expr: &Expr) {
+    write_value_expr(sql, None, scope, expr);
+}
+
+/// PostgreSQL type of a literal parameter (bare parameters have no type to infer).
+fn cast_type(kind: &FieldKind) -> &'static str {
+    match kind {
+        FieldKind::Boolean => "boolean",
+        FieldKind::Integer | FieldKind::BigInteger => "bigint",
+        FieldKind::Float => "double precision",
+        FieldKind::Decimal { .. } => "numeric",
+        FieldKind::Date => "date",
+        FieldKind::DateTime => "timestamp with time zone",
+        FieldKind::Time => "time",
+        FieldKind::Uuid => "uuid",
+        FieldKind::Json => "jsonb",
+        FieldKind::String { .. } | FieldKind::Text => "text",
+    }
+}
+
+fn write_args(sql: &mut Sql<'_>, ctx: Option<&Ctx<'_>>, scope: &Scope, args: &[Expr]) {
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            sql.push(", ");
+        }
+        write_value_expr(sql, ctx, scope, arg);
+    }
+}
+
+/// Writes an expression. `scope` resolves the query's own fields; `ctx` (annotations only) is
+/// needed for `Case` conditions and subqueries.
+fn write_value_expr(sql: &mut Sql<'_>, ctx: Option<&Ctx<'_>>, scope: &Scope, expr: &Expr) {
     match expr {
         Expr::Field(index) => {
             let column = scope.col(sql, &scope.model.fields[*index]);
             sql.push(&column);
         }
         Expr::Value(value) => sql.bind(value.clone()),
+        Expr::Literal(Value::Null, _) => sql.push("NULL"),
+        Expr::Literal(value, kind) => {
+            if sql.postgres() {
+                let placeholder = sql.param(value.clone());
+                sql.push(&format!("CAST({placeholder} AS {})", cast_type(kind)));
+            } else {
+                sql.bind(value.clone());
+            }
+        }
         Expr::Binary(left, op, right) => {
             sql.push("(");
-            write_expr(sql, scope, left);
+            write_value_expr(sql, ctx, scope, left);
             sql.push(&format!(" {} ", op.symbol()));
-            write_expr(sql, scope, right);
+            write_value_expr(sql, ctx, scope, right);
             sql.push(")");
         }
+        Expr::Outer(index) => {
+            let outer = sql
+                .outer
+                .last()
+                .cloned()
+                .expect("OuterRef is only resolved inside a subquery");
+            let column = outer.col(sql, &outer.model.fields[*index]);
+            sql.push(&column);
+        }
+        Expr::OuterName(name) => {
+            unreachable!("OuterRef('{name}') outside Subquery()/Exists() is refused earlier")
+        }
+        Expr::Func(func, args) => write_func(sql, ctx, scope, *func, args),
+        Expr::Case(whens, default) => {
+            let ctx = ctx.expect("Case() is only compiled in annotations");
+            sql.push("CASE");
+            for (condition, then) in whens {
+                sql.push(" WHEN ");
+                node(sql, ctx, condition, 0, false);
+                sql.push(" THEN ");
+                write_value_expr(sql, Some(ctx), scope, then);
+            }
+            sql.push(" ELSE ");
+            write_value_expr(sql, Some(ctx), scope, default);
+            sql.push(" END");
+        }
+        Expr::Subquery(inner) | Expr::Exists(inner) => {
+            let ctx = ctx.expect("subqueries are only compiled in annotations");
+            sql.outer.push(ctx.outer.clone());
+            if let Expr::Exists(_) = expr {
+                sql.push("EXISTS (");
+                select_into(sql, inner, Columns::Key);
+            } else {
+                sql.push("(");
+                let first = if inner.limit.is_some() {
+                    (**inner).clone()
+                } else {
+                    inner.window(inner.offset, Some(1))
+                };
+                subquery(sql, &first);
+            }
+            sql.push(")");
+            sql.outer.pop();
+        }
     }
+}
+
+fn write_func(sql: &mut Sql<'_>, ctx: Option<&Ctx<'_>>, scope: &Scope, func: Func, args: &[Expr]) {
+    let postgres = sql.postgres();
+    let simple = |name: &str| name.to_string();
+    let name = match func {
+        Func::Lower => simple("LOWER"),
+        Func::Upper => simple("UPPER"),
+        Func::Length => simple("LENGTH"),
+        Func::Trim => simple("TRIM"),
+        Func::Abs => simple("ABS"),
+        Func::Coalesce => simple("COALESCE"),
+        Func::Greatest => simple(if postgres { "GREATEST" } else { "MAX" }),
+        Func::Least => simple(if postgres { "LEAST" } else { "MIN" }),
+        Func::Now => {
+            sql.push(if postgres {
+                "CURRENT_TIMESTAMP"
+            } else {
+                "strftime('%Y-%m-%d %H:%M:%f', 'now')"
+            });
+            return;
+        }
+        Func::Concat if postgres => simple("CONCAT"),
+        Func::Concat => {
+            // SQLite: NULL parts count as empty text, as with PostgreSQL's CONCAT.
+            sql.push("(");
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    sql.push(" || ");
+                }
+                sql.push("COALESCE(CAST(");
+                write_value_expr(sql, ctx, scope, arg);
+                sql.push(" AS TEXT), '')");
+            }
+            sql.push(")");
+            return;
+        }
+    };
+    sql.push(&name);
+    sql.push("(");
+    write_args(sql, ctx, scope, args);
+    sql.push(")");
 }
 
 /// One comparison. `scope` holds the compared field; `expr_scope` the root fields F() names.
@@ -590,6 +832,21 @@ fn leaf(
             nullable_annotation(&ctx.query.annotations[*index]),
         ),
     };
+    let whole_document = Transform::Json(Vec::new());
+    let transform = match &condition.transform {
+        Some(transform) => Some(transform),
+        // Key tests and containment on the whole JSON document.
+        None if condition.lookup.is_json_key() || is_containment(condition) => {
+            Some(&whole_document)
+        }
+        None => None,
+    };
+    if let (Some(transform), Column::Sql(raw)) = (transform, &column) {
+        // The guard tests the stored column: a transform of NULL is NULL.
+        let guard = nullable && negations % 2 == 1;
+        transformed_leaf(sql, raw, transform, condition, guard, in_or);
+        return;
+    }
     let mut guards: Vec<Column> = Vec::new();
     if negations % 2 == 1 && condition.lookup != Lookup::IsNull {
         if nullable {
@@ -617,6 +874,28 @@ fn leaf(
         (Lookup::IsNull, Operand::Flag(flag)) => {
             write_column(sql, ctx, &column);
             sql.push(if *flag { " IS NULL" } else { " IS NOT NULL" });
+        }
+        (Lookup::In, Operand::Subquery(inner)) => {
+            write_column(sql, ctx, &column);
+            sql.push(" IN (");
+            subquery(sql, inner);
+            sql.push(")");
+        }
+        (Lookup::Range, Operand::List(values)) => {
+            write_column(sql, ctx, &column);
+            sql.push(" BETWEEN ");
+            sql.bind(values[0].clone());
+            sql.push(" AND ");
+            sql.bind(values[1].clone());
+        }
+        (lookup, Operand::Value(Value::Text(pattern))) if lookup.is_regex() => {
+            write_column(sql, ctx, &column);
+            let placeholder = sql.next_placeholder();
+            let (fragment, param) =
+                sql.dialect
+                    .regex_lookup("", &placeholder, pattern, *lookup == Lookup::IRegex);
+            sql.push(&fragment);
+            sql.params.push(param);
         }
         (Lookup::In, Operand::List(values)) if values.is_empty() => sql.push("0 = 1"),
         (Lookup::In, Operand::List(values)) => {
@@ -669,6 +948,287 @@ fn leaf(
     }
 }
 
+/// `field__contains=<dict>` on a JSON field: containment, not a text search.
+fn is_containment(condition: &Condition) -> bool {
+    condition.lookup == Lookup::Contains
+        && matches!(&condition.target, Target::Field(path) if path.meta().kind == FieldKind::Json)
+}
+
+/// A one-column query inside `IN (...)`: its `values_list()` field, else the primary key.
+fn subquery(sql: &mut Sql<'_>, inner: &Query) {
+    let columns = if inner.values.is_some() {
+        Columns::Full
+    } else {
+        Columns::Key
+    };
+    select_into(sql, inner, columns);
+}
+
+/// SQLite's JSON path for `keys` (`$."owner"."pets"[0]`, `[#-1]` from the end).
+fn sqlite_json_path(keys: &[JsonKey]) -> String {
+    let mut path = String::from("$");
+    for key in keys {
+        match key {
+            JsonKey::Key(name) => {
+                path.push_str(".\"");
+                path.push_str(&name.replace('\\', "\\\\").replace('"', "\\\""));
+                path.push('"');
+            }
+            JsonKey::Index(index) if *index < 0 => path.push_str(&format!("[#{index}]")),
+            JsonKey::Index(index) => path.push_str(&format!("[{index}]")),
+        }
+    }
+    path
+}
+
+/// The value at `keys` inside JSON `column`: as JSON (`text = false`, for comparisons with JSON
+/// operands) or as text (pattern lookups). Keys are parameters, never SQL text.
+fn json_value(sql: &mut Sql<'_>, column: &str, keys: &[JsonKey], text: bool) -> String {
+    if sql.postgres() {
+        let mut out = column.to_string();
+        for (i, key) in keys.iter().enumerate() {
+            let operator = if text && i + 1 == keys.len() {
+                "->>"
+            } else {
+                "->"
+            };
+            let operand = match key {
+                JsonKey::Key(name) => {
+                    format!("CAST({} AS text)", sql.param(Value::Text(name.clone())))
+                }
+                JsonKey::Index(index) => {
+                    format!("CAST({} AS integer)", sql.param(Value::Integer(*index)))
+                }
+            };
+            out = format!("({out} {operator} {operand})");
+        }
+        out
+    } else {
+        let path = sql.param(Value::Text(sqlite_json_path(keys)));
+        format!("json_extract({column}, {path})")
+    }
+}
+
+/// The JSON document at `keys` as JSON text (SQLite) or `jsonb` (PostgreSQL), for containment
+/// and key tests.
+fn json_document(sql: &mut Sql<'_>, column: &str, keys: &[JsonKey]) -> String {
+    if keys.is_empty() {
+        return column.to_string();
+    }
+    if sql.postgres() {
+        json_value(sql, column, keys, false)
+    } else {
+        let path = sql.param(Value::Text(sqlite_json_path(keys)));
+        format!("({column} -> {path})")
+    }
+}
+
+/// A JSON operand (JSON text) as a value comparable with [`json_value`].
+fn json_operand(sql: &mut Sql<'_>, value: &Value) -> String {
+    let placeholder = sql.param(value.clone());
+    if sql.postgres() {
+        format!("CAST(CAST({placeholder} AS text) AS jsonb)")
+    } else {
+        format!("json_extract({placeholder}, '$')")
+    }
+}
+
+/// Writes `document` has key/keys (PostgreSQL `?`, SQLite `json_type(...) IS NOT NULL`).
+fn json_key_test(
+    sql: &mut Sql<'_>,
+    column: &str,
+    keys: &[JsonKey],
+    lookup: Lookup,
+    operand: &Operand,
+) {
+    let names: Vec<String> = match operand {
+        Operand::Value(Value::Text(name)) => vec![name.clone()],
+        Operand::List(values) => values
+            .iter()
+            .filter_map(|v| match v {
+                Value::Text(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => unreachable!("validated key operand"),
+    };
+    let joiner = if lookup == Lookup::HasAnyKeys {
+        " OR "
+    } else {
+        " AND "
+    };
+    sql.push("(");
+    for (i, name) in names.iter().enumerate() {
+        if i > 0 {
+            sql.push(joiner);
+        }
+        if sql.postgres() {
+            let document = json_document(sql, column, keys);
+            let placeholder = sql.param(Value::Text(name.clone()));
+            sql.push(&format!("{document} ? CAST({placeholder} AS text)"));
+        } else {
+            let mut path = keys.to_vec();
+            path.push(JsonKey::Key(name.clone()));
+            let placeholder = sql.param(Value::Text(sqlite_json_path(&path)));
+            sql.push(&format!(
+                "(json_valid({column}) AND json_type({column}, {placeholder}) IS NOT NULL)"
+            ));
+        }
+    }
+    sql.push(")");
+}
+
+/// A condition whose target value is transformed (date part or JSON key path). `raw` is the
+/// stored column; `guard` adds `raw IS NOT NULL` (negated nullable comparisons).
+fn transformed_leaf(
+    sql: &mut Sql<'_>,
+    raw: &str,
+    transform: &Transform,
+    condition: &Condition,
+    guard: bool,
+    in_or: bool,
+) {
+    let wrap = guard && in_or;
+    if wrap {
+        sql.push("(");
+    }
+    let lookup = condition.lookup;
+    let operand = &condition.operand;
+    match transform {
+        Transform::Date(part) => {
+            let kind = match &condition.target {
+                Target::Field(path) => path.meta().kind.clone(),
+                Target::Annotation(_) => FieldKind::DateTime,
+            };
+            let value = sql.dialect.date_part(raw, *part, &kind);
+            plain_comparison(sql, &value, lookup, operand, false);
+        }
+        Transform::Json(keys) => {
+            if lookup.is_json_key() {
+                json_key_test(sql, raw, keys, lookup, operand);
+            } else if lookup == Lookup::Contains {
+                let document = json_document(sql, raw, keys);
+                let Operand::Value(value) = operand else {
+                    unreachable!("validated containment operand")
+                };
+                let placeholder = sql.param(value.clone());
+                if sql.postgres() {
+                    sql.push(&format!(
+                        "{document} @> CAST(CAST({placeholder} AS text) AS jsonb)"
+                    ));
+                } else {
+                    sql.push(&format!("ferro_json_contains({document}, {placeholder})"));
+                }
+            } else if lookup == Lookup::IsNull {
+                let Operand::Flag(flag) = operand else {
+                    unreachable!("validated isnull operand")
+                };
+                let value = json_value(sql, raw, keys, false);
+                if sql.postgres() {
+                    let operator = if *flag { "=" } else { "<>" };
+                    sql.push(&format!(
+                        "COALESCE({value}, 'null'::jsonb) {operator} 'null'::jsonb"
+                    ));
+                } else {
+                    sql.push(&format!(
+                        "{value} {}",
+                        if *flag { "IS NULL" } else { "IS NOT NULL" }
+                    ));
+                }
+            } else if lookup.is_text() || lookup.is_regex() {
+                let value = json_value(sql, raw, keys, true);
+                plain_comparison(sql, &value, lookup, operand, false);
+            } else {
+                let value = json_value(sql, raw, keys, false);
+                plain_comparison(sql, &value, lookup, operand, true);
+            }
+        }
+    }
+    if guard {
+        sql.push(&format!(" AND {raw} IS NOT NULL"));
+    }
+    if wrap {
+        sql.push(")");
+    }
+}
+
+/// `value <lookup> operand` for an already written value expression. With `json`, operands are
+/// JSON text compared as JSON.
+fn plain_comparison(sql: &mut Sql<'_>, value: &str, lookup: Lookup, operand: &Operand, json: bool) {
+    let bind = |sql: &mut Sql<'_>, item: &Value| -> String {
+        if json {
+            json_operand(sql, item)
+        } else {
+            sql.param(item.clone())
+        }
+    };
+    match (lookup, operand) {
+        (Lookup::IsNull, Operand::Flag(flag)) => {
+            sql.push(value);
+            sql.push(if *flag { " IS NULL" } else { " IS NOT NULL" });
+        }
+        (Lookup::In, Operand::List(values)) if values.is_empty() => sql.push("0 = 1"),
+        (Lookup::In, Operand::List(values)) => {
+            sql.push(value);
+            sql.push(" IN (");
+            for (i, item) in values.iter().enumerate() {
+                if i > 0 {
+                    sql.push(", ");
+                }
+                let placeholder = bind(sql, item);
+                sql.push(&placeholder);
+            }
+            sql.push(")");
+        }
+        (Lookup::In, Operand::Subquery(inner)) => {
+            sql.push(value);
+            sql.push(" IN (");
+            subquery(sql, inner);
+            sql.push(")");
+        }
+        (Lookup::Range, Operand::List(values)) => {
+            sql.push(value);
+            sql.push(" BETWEEN ");
+            let low = bind(sql, &values[0]);
+            sql.push(&low);
+            sql.push(" AND ");
+            let high = bind(sql, &values[1]);
+            sql.push(&high);
+        }
+        (lookup, Operand::Value(Value::Text(text))) if lookup.is_text() => {
+            let placeholder = sql.next_placeholder();
+            let (fragment, param) = sql.dialect.text_lookup(value, lookup, &placeholder, text);
+            sql.push(&fragment);
+            sql.params.push(param);
+        }
+        (lookup, Operand::Value(Value::Text(pattern))) if lookup.is_regex() => {
+            let placeholder = sql.next_placeholder();
+            let (fragment, param) =
+                sql.dialect
+                    .regex_lookup(value, &placeholder, pattern, lookup == Lookup::IRegex);
+            sql.push(&fragment);
+            sql.params.push(param);
+        }
+        (lookup, Operand::Value(item)) => {
+            sql.push(value);
+            sql.push(&format!(" {} ", comparison(lookup)));
+            let placeholder = bind(sql, item);
+            sql.push(&placeholder);
+        }
+        (lookup, operand) => unreachable!("validated condition {lookup:?} {operand:?}"),
+    }
+}
+
+fn comparison(lookup: Lookup) -> &'static str {
+    match lookup {
+        Lookup::Gt => ">",
+        Lookup::Gte => ">=",
+        Lookup::Lt => "<",
+        Lookup::Lte => "<=",
+        _ => "=",
+    }
+}
+
 /// `EXISTS (SELECT 1 FROM <hop> ... [AND EXISTS (<next hop> ...)])`, calling `last` inside the
 /// innermost subquery to add its conditions.
 fn exists_chain(
@@ -714,6 +1274,7 @@ fn related_isnull(sql: &mut Sql<'_>, outer: &Scope, condition: &Condition, depth
 
 fn is_related_isnull(condition: &Condition, depth: usize) -> bool {
     condition.hops().len() > depth
+        && condition.transform.is_none()
         && condition.lookup == Lookup::IsNull
         && condition.operand == Operand::Flag(true)
 }
@@ -972,7 +1533,8 @@ fn grouped_paths(query: &Query) -> impl Iterator<Item = &[Hop]> {
         .annotations
         .iter()
         .filter(|a| a.grouped)
-        .filter_map(|a| a.aggregate.path.as_ref().map(|p| p.hops.as_slice()))
+        .filter_map(|a| a.aggregate().and_then(|agg| agg.path.as_ref()))
+        .map(|p| p.hops.as_slice())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1007,7 +1569,11 @@ fn select_into(sql: &mut Sql<'_>, query: &Query, columns: Columns) {
     wanted.extend(ordering_paths(query));
     let joins = Joins::plan(sql, &root_scope, wanted);
     let ctx = Ctx::new(query, joins);
-    sql.push("SELECT ");
+    sql.push(if query.distinct && columns == Columns::Full {
+        "SELECT DISTINCT "
+    } else {
+        "SELECT "
+    });
     let mut first = true;
     let mut separator = |sql: &mut Sql<'_>| {
         if !first {
@@ -1077,9 +1643,9 @@ fn plain_ctx(query: &Query) -> Ctx<'_> {
 
 pub fn count(dialect: &dyn Dialect, query: &Query) -> Statement {
     let mut sql = Sql::new(dialect);
-    if query.is_grouped() || query.is_windowed() {
+    if query.is_grouped() || query.is_windowed() || query.distinct {
         sql.push("SELECT COUNT(*) FROM (");
-        let columns = if query.is_grouped() {
+        let columns = if query.is_grouped() || query.distinct {
             Columns::Full
         } else {
             Columns::Key
@@ -1096,9 +1662,9 @@ pub fn count(dialect: &dyn Dialect, query: &Query) -> Statement {
 
 pub fn exists(dialect: &dyn Dialect, query: &Query) -> Statement {
     let mut sql = Sql::new(dialect);
-    if query.is_grouped() || query.is_windowed() {
+    if query.is_grouped() || query.is_windowed() || query.distinct {
         sql.push("SELECT 1 FROM (");
-        let columns = if query.is_grouped() {
+        let columns = if query.is_grouped() || query.distinct {
             Columns::Full
         } else {
             Columns::Key

@@ -111,22 +111,96 @@ def _auth_state(request: Any) -> _AuthState:
     return state
 
 
-async def authenticate(username: str, password: str) -> User | None:
+class LoginThrottled(HTTPException):
+    """Too many failed logins for this username (from this client): answered 429 with
+    ``Retry-After`` unless handled. ``retry_after`` is in seconds."""
+
+    def __init__(self, retry_after: int) -> None:
+        self.retry_after = retry_after
+        minutes = max(1, round(retry_after / 60))
+        super().__init__(
+            429,
+            f"Too many failed login attempts; try again in {minutes} minute(s)",
+            headers={"retry-after": str(retry_after)},
+        )
+
+
+_throttle = {"attempts": 5, "lockout": 900.0}
+
+
+def configure_login_throttle(attempts: int | None = None, lockout: float | None = None) -> None:
+    """Failed logins allowed per username (and client address) before ``authenticate()``
+    refuses it for ``lockout`` seconds. ``attempts=0`` turns the throttle off."""
+    if attempts is not None:
+        if isinstance(attempts, bool) or not isinstance(attempts, int) or attempts < 0:
+            raise ValueError("max_login_attempts must be a non-negative integer")
+        _throttle["attempts"] = attempts
+    if lockout is not None:
+        if isinstance(lockout, bool) or not isinstance(lockout, int | float) or lockout <= 0:
+            raise ValueError("login_lockout must be a positive number of seconds")
+        _throttle["lockout"] = float(lockout)
+
+
+def _throttle_key(username: str, request: Any) -> str:
+    client = getattr(request, "client", None) if request is not None else None
+    address = client[0] if isinstance(client, tuple) and client else ""
+    digest = hashlib.sha256(f"{username.strip().lower()}\0{address}".encode()).hexdigest()
+    return f"ferro:login-failures:{digest[:32]}"
+
+
+async def authenticate(username: str, password: str, request: Any = None) -> User | None:
     """The active user with these credentials, or None. Takes as long for unknown users as for
-    wrong passwords (both verify one hash)."""
+    wrong passwords (both verify one hash).
+
+    Failures are counted per username — and per client address when ``request`` is given —
+    in the configured cache; after ``max_login_attempts`` the username is refused with
+    :class:`LoginThrottled` until ``login_lockout`` seconds pass (``app.add_auth()``)."""
+    from ferro.cache import cache
+
     if not isinstance(username, str) or not isinstance(password, str):
         return None
+    from ferro import signals
+
+    attempts = _throttle["attempts"]
+    key = _throttle_key(username, request)
+    if attempts and int(await cache.get(key, 0) or 0) >= attempts:
+        await signals.user_login_failed.send(
+            None, username=username, request=request, throttled=True
+        )
+        raise LoginThrottled(int(_throttle["lockout"]))
     user = await User.objects.filter(username=username.strip()).first()
     if user is None or not user.is_active or not user.password:
         await check_password(password, await dummy_hash())
+        await _count_failure(key)
+        await signals.user_login_failed.send(
+            None, username=username, request=request, throttled=False
+        )
         return None
     matches, needs_rehash = await check_password(password, user.password)
     if not matches:
+        await _count_failure(key)
+        await signals.user_login_failed.send(
+            None, username=username, request=request, throttled=False
+        )
         return None
+    if attempts:
+        await cache.delete(key)
     if needs_rehash:
         user.password = await make_password(password)
         await User.objects.filter(pk=user.pk).update(password=user.password)
     return user
+
+
+async def _count_failure(key: str) -> None:
+    from ferro.cache import cache
+
+    if not _throttle["attempts"]:
+        return
+    if not await cache.add(key, 1, timeout=_throttle["lockout"]):
+        try:
+            await cache.incr(key)
+        except ValueError:  # expired between add() and incr()
+            await cache.add(key, 1, timeout=_throttle["lockout"])
 
 
 async def login(request: Any, user: User) -> None:
@@ -152,11 +226,15 @@ async def login(request: Any, user: User) -> None:
     request.state.user = user
     user.last_login = _now()
     await User.objects.filter(pk=user.pk).update(last_login=user.last_login)
+    from ferro import signals
+
+    await signals.user_logged_in.send(type(user), request=request, user=user)
 
 
 async def logout(request: Any) -> None:
     """Ends the session: deletes it and clears the cookie."""
     auth = _auth_state(request)
+    user = getattr(request.state, "user", None)
     if auth.row is not None:
         await Session.objects.filter(pk=auth.row.pk).delete()
     auth.row = None
@@ -164,6 +242,12 @@ async def logout(request: Any) -> None:
     auth.action = "logout"
     request.state.session = SessionData()
     request.state.user = AnonymousUser()
+    from ferro import signals
+
+    signed_in = user if getattr(user, "is_authenticated", False) else None
+    await signals.user_logged_out.send(
+        type(signed_in) if signed_in is not None else None, request=request, user=signed_in
+    )
 
 
 async def read_session(cookies: Any) -> tuple[Any, Any]:

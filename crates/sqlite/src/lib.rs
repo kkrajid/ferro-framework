@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod errors;
+mod functions;
 mod worker;
 
 use std::path::PathBuf;

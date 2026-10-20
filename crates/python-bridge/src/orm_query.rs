@@ -8,7 +8,7 @@ use ferro_database::{Job, Value};
 use ferro_orm::compile::{self, Assignment};
 use ferro_orm::{
     AggFunc, Aggregate, ArithOp, Condition, Expr, FieldKind, FieldMeta, Lock, Lookup, ModelMeta,
-    Node, Operand, Query, Registry, Selected, Shape, Target, resolve_lookup,
+    Node, Operand, Query, Registry, Selected, Shape, Target, Transform, resolve_lookup_key,
 };
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
@@ -44,6 +44,21 @@ impl PyQuery {
 
     fn meta(&self) -> Arc<ModelMeta> {
         self.query.model.clone()
+    }
+
+    /// Refuses a query that uses `OuterRef` without being inside another query.
+    fn check_outer(&self, py: Python<'_>) -> PyResult<()> {
+        match self.query.unresolved_outer() {
+            None => Ok(()),
+            Some(name) => Err(field_error(
+                py,
+                format!(
+                    "{}: OuterRef('{name}') can only be used in a queryset passed to \
+                     Subquery() or Exists()",
+                    self.query.model.label
+                ),
+            )),
+        }
     }
 
     /// `count()`, `exists()` and `aggregate()` read no rows to lock.
@@ -124,6 +139,7 @@ fn expr(query: &Query, field: &FieldMeta, value: &Bound<'_, PyAny>) -> PyResult<
                 Ok(Expr::Field(index))
             }
             "V" => Ok(Expr::Value(constant(label, field, &tree.get_item(1)?)?)),
+            "OUTER" => Ok(Expr::OuterName(tree.get_item(1)?.extract()?)),
             "OP" => {
                 let symbol: String = tree.get_item(1)?.extract()?;
                 let op = ArithOp::parse(&symbol).ok_or_else(|| {
@@ -158,6 +174,154 @@ fn expr(query: &Query, field: &FieldMeta, value: &Bound<'_, PyAny>) -> PyResult<
     convert(query, label, field, &tree).map(Some)
 }
 
+/// A literal inside an annotation expression, typed by its Python type.
+fn literal(value: &Bound<'_, PyAny>) -> PyResult<Expr> {
+    let py = value.py();
+    let types = orm_types(py)?;
+    let kind = if value.is_none() {
+        return Ok(Expr::Literal(Value::Null, FieldKind::Text));
+    } else if value.is_instance_of::<PyBool>() {
+        return Ok(Expr::Literal(
+            Value::Integer(i64::from(value.is_truthy()?)),
+            FieldKind::Boolean,
+        ));
+    } else if value.is_instance_of::<PyInt>() {
+        FieldKind::BigInteger
+    } else if value.is_instance_of::<PyFloat>() {
+        FieldKind::Float
+    } else if value.is_instance_of::<PyString>() {
+        FieldKind::Text
+    } else if value.is_instance(types.decimal.bind(py))? {
+        let text = value.str()?.to_string();
+        let places = text.split_once('.').map_or(0, |(_, f)| f.len());
+        return Ok(Expr::Literal(
+            Value::Decimal(text),
+            FieldKind::Decimal {
+                max_digits: 38,
+                decimal_places: u8::try_from(places).unwrap_or(0),
+            },
+        ));
+    } else if value.is_instance(types.datetime.bind(py))? {
+        FieldKind::DateTime
+    } else if value.is_instance(types.date.bind(py))? {
+        FieldKind::Date
+    } else if value.is_instance(types.time.bind(py))? {
+        FieldKind::Time
+    } else if value.is_instance(types.uuid.bind(py))? {
+        FieldKind::Uuid
+    } else {
+        FieldKind::Json
+    };
+    let field = FieldMeta::column("value", kind.clone());
+    Ok(Expr::Literal(
+        to_value("Value()", &field, value, Mode::Compare)?,
+        kind,
+    ))
+}
+
+/// An annotation expression tree from Python (`F`, literals, arithmetic, functions, `Case`,
+/// `Subquery`, `Exists`) over `query`'s model (Feature 022).
+fn value_expr(
+    py: Python<'_>,
+    registry: &Registry,
+    query: &Query,
+    tree: &Bound<'_, PyAny>,
+) -> PyResult<Expr> {
+    let label = &query.model.label;
+    if !tree.is_instance_of::<PyTuple>() {
+        return literal(tree);
+    }
+    let tag: String = tree.get_item(0)?.extract()?;
+    let item = |index: usize| tree.get_item(index);
+    match tag.as_str() {
+        "F" => {
+            let name: String = item(1)?.extract()?;
+            let index = if name == "pk" {
+                Some(query.model.pk)
+            } else {
+                query.model.field(&name)
+            };
+            index.map(Expr::Field).ok_or_else(|| {
+                field_error(
+                    py,
+                    format!(
+                        "{label} has no field '{name}' (F() in expressions names the model's own                          fields); fields: {}",
+                        query.model.field_names().join(", ")
+                    ),
+                )
+            })
+        }
+        "V" | "L" => literal(&item(1)?),
+        "OP" => {
+            let symbol: String = item(1)?.extract()?;
+            let op = ArithOp::parse(&symbol)
+                .ok_or_else(|| field_error(py, format!("{label}: unknown operator '{symbol}'")))?;
+            let left = value_expr(py, registry, query, &item(2)?)?;
+            let right = value_expr(py, registry, query, &item(3)?)?;
+            Ok(Expr::Binary(Box::new(left), op, Box::new(right)))
+        }
+        "FN" => {
+            let name: String = item(1)?.extract()?;
+            let func = ferro_orm::Func::parse(&name)
+                .ok_or_else(|| field_error(py, format!("unknown function '{name}'")))?;
+            let args: Vec<Expr> = item(2)?
+                .try_iter()?
+                .map(|arg| value_expr(py, registry, query, &arg?))
+                .collect::<PyResult<_>>()?;
+            let (low, high) = func.arity();
+            if args.len() < low || args.len() > high {
+                return Err(field_error(
+                    py,
+                    format!(
+                        "{name}() takes {} argument(s), got {}",
+                        if low == high {
+                            low.to_string()
+                        } else {
+                            format!("at least {low}")
+                        },
+                        args.len()
+                    ),
+                ));
+            }
+            Ok(Expr::Func(func, args))
+        }
+        "CASE" => {
+            let mut whens = Vec::new();
+            for when in item(1)?.try_iter()? {
+                let when = when?;
+                let condition = when.get_item(0)?.cast_into::<PyTuple>()?;
+                let condition = node(py, registry, query, &condition)?
+                    .ok_or_else(|| field_error(py, "When() needs a condition"))?;
+                let then = value_expr(py, registry, query, &when.get_item(1)?)?;
+                whens.push((condition, then));
+            }
+            if whens.is_empty() {
+                return Err(field_error(py, "Case() needs at least one When()"));
+            }
+            let default = value_expr(py, registry, query, &item(2)?)?;
+            Ok(Expr::Case(whens, Box::new(default)))
+        }
+        "SUB" | "EXISTS" => {
+            let inner = queryset(&item(1)?)?
+                .ok_or_else(|| field_error(py, format!("{tag}: expected a queryset")))?;
+            if tag == "SUB" {
+                inner.subquery_field().map_err(|e| orm_error(py, e))?;
+                Ok(Expr::Subquery(Box::new(inner)))
+            } else {
+                Ok(Expr::Exists(Box::new(inner)))
+            }
+        }
+        "OUTER" => Err(field_error(
+            py,
+            "OuterRef() can only be used in filters of a Subquery() or Exists() queryset",
+        )),
+        other => Err(field_error(
+            py,
+            format!("{label}: unknown expression '{other}'"),
+        )),
+    }
+}
+
 /// The operand of a lookup on `field` (owned by `owner`; `None` for annotations).
 fn operand(
     query: &Query,
@@ -187,6 +351,17 @@ fn operand(
     };
     match lookup {
         Lookup::In => {
+            if let Some(inner) = queryset(value)? {
+                let selected = inner.subquery_field().map_err(|e| orm_error(py, e))?;
+                if selected.kind.is_text() != field.kind.is_text() {
+                    return Err(fail(&format!(
+                        "the queryset selects {} values, not {} values",
+                        selected.kind.name(),
+                        field.kind.name()
+                    )));
+                }
+                return Ok(Operand::Subquery(Box::new(inner)));
+            }
             if value.is_instance_of::<PyString>() || value.is_none() {
                 return Err(fail("needs a list, tuple or set of values"));
             }
@@ -205,7 +380,19 @@ fn operand(
             }
             Ok(Operand::Flag(value.is_truthy()?))
         }
-        lookup if lookup.is_text() => {
+        Lookup::Range => {
+            let pair: Vec<Bound<'_, PyAny>> = match value.try_iter() {
+                Ok(items) if !value.is_instance_of::<PyString>() => {
+                    items.collect::<PyResult<_>>()?
+                }
+                _ => return Err(fail("needs two values (low, high)")),
+            };
+            if pair.len() != 2 {
+                return Err(fail("needs two values (low, high)"));
+            }
+            Ok(Operand::List(vec![convert(&pair[0])?, convert(&pair[1])?]))
+        }
+        lookup if lookup.is_text() || lookup.is_regex() => {
             let text = value
                 .cast::<PyString>()
                 .map_err(|_| fail("needs a string"))?;
@@ -213,6 +400,86 @@ fn operand(
         }
         _ => Ok(Operand::Value(convert(value)?)),
     }
+}
+
+/// The native query of a `QuerySet` (or a native `Query`) given as a lookup value.
+fn queryset(value: &Bound<'_, PyAny>) -> PyResult<Option<Query>> {
+    if let Ok(native) = value.cast::<PyQuery>() {
+        return Ok(Some(native.get().query.clone()));
+    }
+    let py = value.py();
+    if value.hasattr(intern!(py, "_query"))?
+        && let Ok(native) = value.getattr(intern!(py, "_query"))?.cast_into::<PyQuery>()
+    {
+        return Ok(Some(native.get().query.clone()));
+    }
+    Ok(None)
+}
+
+/// JSON text for a value compared with a JSON document or a value inside one.
+fn json_text(label: &str, field: &FieldMeta, value: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let py = value.py();
+    let bytes = crate::json::encode(value)
+        .map_err(|err| field_error(py, format!("{label}.{}: {}", field.name, err.message(py))))?;
+    Ok(Value::Text(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+/// The operand of a lookup on a JSON field, or on a key path inside it (Feature 022).
+fn json_operand(
+    label: &str,
+    field: &FieldMeta,
+    lookup: Lookup,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Operand> {
+    let py = value.py();
+    let fail = |problem: &str| {
+        field_error(
+            py,
+            format!("{label}.{}__{}: {problem}", field.name, lookup.name()),
+        )
+    };
+    let text = |item: &Bound<'_, PyAny>| -> PyResult<Value> {
+        Ok(Value::Text(
+            item.cast::<PyString>()
+                .map_err(|_| fail("needs a string"))?
+                .to_str()?
+                .to_string(),
+        ))
+    };
+    let items = || -> PyResult<Vec<Bound<'_, PyAny>>> {
+        if value.is_instance_of::<PyString>() || value.is_none() {
+            return Err(fail("needs a list"));
+        }
+        value
+            .try_iter()
+            .map_err(|_| fail("needs a list"))?
+            .collect::<PyResult<_>>()
+    };
+    if value.hasattr(intern!(py, "_ferro_expr"))? {
+        return Err(fail("cannot compare a JSON value with an F() expression"));
+    }
+    Ok(match lookup {
+        Lookup::IsNull => {
+            if !value.is_instance_of::<PyBool>() {
+                return Err(fail("needs True or False"));
+            }
+            Operand::Flag(value.is_truthy()?)
+        }
+        Lookup::HasKey => Operand::Value(text(value)?),
+        Lookup::HasKeys | Lookup::HasAnyKeys => {
+            Operand::List(items()?.iter().map(&text).collect::<PyResult<_>>()?)
+        }
+        Lookup::Contains => Operand::Value(json_text(label, field, value)?),
+        lookup if lookup.is_text() || lookup.is_regex() => Operand::Value(text(value)?),
+        Lookup::In | Lookup::Range => Operand::List(
+            items()?
+                .iter()
+                .map(|item| json_text(label, field, item))
+                .collect::<PyResult<_>>()?,
+        ),
+        _ if value.is_none() => Operand::Value(Value::Null),
+        _ => Operand::Value(json_text(label, field, value)?),
+    })
 }
 
 fn leaf(
@@ -235,8 +502,8 @@ fn leaf(
             })?,
         };
         let annotation = &query.annotations[index];
-        let field = annotation.aggregate.output_field(&annotation.name);
-        if lookup.is_text() {
+        let field = annotation.output_field();
+        if lookup.is_text() || lookup.is_regex() || lookup.is_json_key() {
             return Err(field_error(
                 py,
                 format!(
@@ -248,11 +515,35 @@ fn leaf(
         let operand = operand(query, None, &field, lookup, value)?;
         Condition::on(label, &field, Target::Annotation(index), lookup, operand)
     } else {
-        let (path, lookup) =
-            resolve_lookup(registry, &query.model, key).map_err(|e| orm_error(py, e))?;
-        let field = path.meta().clone();
-        let operand = operand(query, Some(&path.model), &field, lookup, value)?;
-        Condition::on(label, &field, Target::Field(path), lookup, operand)
+        let resolved =
+            resolve_lookup_key(registry, &query.model, key).map_err(|e| orm_error(py, e))?;
+        let lookup = resolved.lookup;
+        let stored = resolved.path.meta().clone();
+        let json = stored.kind == FieldKind::Json
+            && (resolved.transform.is_some() || lookup.is_json_key() || lookup == Lookup::Contains);
+        let (field, operand) = if json {
+            let operand = json_operand(label, &stored, lookup, value)?;
+            (stored, operand)
+        } else if let Some(Transform::Date(part)) = &resolved.transform {
+            if value.hasattr(intern!(py, "_ferro_expr"))? {
+                return Err(field_error(
+                    py,
+                    format!("{label}: '{key}' cannot be compared with an F() expression"),
+                ));
+            }
+            let mut field = FieldMeta::column(
+                format!("{}__{}", stored.name, part.name()),
+                part.output_kind(),
+            );
+            field.null = true;
+            let operand = operand(query, None, &field, lookup, value)?;
+            (field, operand)
+        } else {
+            let operand = operand(query, Some(&resolved.path.model), &stored, lookup, value)?;
+            (stored, operand)
+        };
+        Condition::on(label, &field, Target::Field(resolved.path), lookup, operand)
+            .map(|condition| condition.transformed(resolved.transform))
     };
     Ok(Node::Leaf(condition.map_err(|e| orm_error(py, e))?))
 }
@@ -327,20 +618,14 @@ fn aggregates(
 
 /// Converts an aggregate's result cell: `Count` → int, `Avg` → float, others keep the field's
 /// type (PostgreSQL returns integer sums as numeric).
-fn aggregate_value<'py>(
-    py: Python<'py>,
-    aggregate: &Aggregate,
-    value: Value,
-) -> PyResult<Bound<'py, PyAny>> {
-    if value == Value::Null {
-        return Ok(py.None().into_bound(py));
-    }
-    let kind = aggregate.output_kind();
-    let value = match (&kind, value) {
+/// Numbers from computed values arrive as the database chose (PostgreSQL sums integers as
+/// numeric); converts them to the kind the value is declared as.
+fn normalize_number(kind: &FieldKind, value: Value) -> PyResult<Value> {
+    Ok(match (kind, value) {
         (FieldKind::Integer | FieldKind::BigInteger, Value::Decimal(text)) => {
             let whole = text.split('.').next().unwrap_or("0");
             Value::Integer(whole.parse().map_err(|_| {
-                PyRuntimeError::new_err(format!("integer aggregate out of range: {text}"))
+                PyRuntimeError::new_err(format!("integer value out of range: {text}"))
             })?)
         }
         (FieldKind::Integer | FieldKind::BigInteger, Value::Real(number)) => {
@@ -352,7 +637,36 @@ fn aggregate_value<'py>(
         ),
         (FieldKind::Float, Value::Integer(number)) => Value::Real(number as f64),
         (_, value) => value,
-    };
+    })
+}
+
+/// An annotation's value as Python: aggregates by their function, expressions by their kind.
+fn annotation_value<'py>(
+    py: Python<'py>,
+    annotation: &ferro_orm::Annotation,
+    value: Value,
+) -> PyResult<Bound<'py, PyAny>> {
+    match &annotation.value {
+        ferro_orm::AnnotationValue::Aggregate(aggregate) => aggregate_value(py, aggregate, value),
+        ferro_orm::AnnotationValue::Expr(_, kind) => {
+            if value == Value::Null {
+                return Ok(py.None().into_bound(py));
+            }
+            let value = normalize_number(kind, value)?;
+            from_value(py, &annotation.output_field(), value)
+        }
+    }
+}
+
+fn aggregate_value<'py>(
+    py: Python<'py>,
+    aggregate: &Aggregate,
+    value: Value,
+) -> PyResult<Bound<'py, PyAny>> {
+    if value == Value::Null {
+        return Ok(py.None().into_bound(py));
+    }
+    let value = normalize_number(&aggregate.output_kind(), value)?;
     let field = match &aggregate.path {
         Some(path) if aggregate.func != AggFunc::Count && aggregate.func != AggFunc::Avg => {
             path.meta().clone()
@@ -390,7 +704,7 @@ fn value_rows<'py>(
             converted.push(match selected {
                 Selected::Field(path) => from_value(py, path.meta(), cell)?,
                 Selected::Annotation(index) => {
-                    aggregate_value(py, &query.annotations[*index].aggregate, cell)?
+                    annotation_value(py, &query.annotations[*index], cell)?
                 }
             });
         }
@@ -485,6 +799,52 @@ impl PyQuery {
         self.derive(py, self.query.reversed())
     }
 
+    /// The database's plan for this query (`EXPLAIN`; SQLite: `EXPLAIN QUERY PLAN`), as text.
+    fn explain<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.check_outer(py)?;
+        let database = current(py)?;
+        let statement = compile::select(database.dialect, &self.query);
+        let prefix = if database.dialect.name() == "postgresql" {
+            "EXPLAIN "
+        } else {
+            "EXPLAIN QUERY PLAN "
+        };
+        let statement =
+            ferro_database::Statement::new(format!("{prefix}{}", statement.sql), statement.params);
+        submit(
+            py,
+            &database,
+            Job::Query(statement),
+            Box::new(|py, result| {
+                let rows = rows(py, result, None)?;
+                let lines: Vec<String> = rows
+                    .rows
+                    .into_iter()
+                    .filter_map(|row| match row.into_iter().last() {
+                        Some(Value::Text(text)) => Some(text),
+                        _ => None,
+                    })
+                    .collect();
+                to_py(py, lines.join("\n"))
+            }),
+        )
+    }
+
+    /// Adds a per-row expression annotation (Feature 022).
+    fn annotate_expr(&self, py: Python<'_>, name: &str, tree: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let expr = value_expr(py, &registry(), &self.query, tree)?;
+        let query = self
+            .query
+            .annotate_expr(name, expr)
+            .map_err(|e| orm_error(py, e))?;
+        Ok(self.derive(py, query))
+    }
+
+    /// `SELECT DISTINCT` (Feature 022).
+    fn distinct(&self, py: Python<'_>) -> Self {
+        self.derive(py, self.query.distinct())
+    }
+
     /// The same query ordered additionally by the primary key (Feature 021).
     fn with_pk_tiebreak(&self, py: Python<'_>) -> Self {
         self.derive(py, self.query.with_pk_tiebreak())
@@ -517,6 +877,7 @@ impl PyQuery {
 
     /// The SELECT this query runs, as `(sql, params)`.
     fn sql(&self, py: Python<'_>) -> PyResult<(String, Vec<Py<PyAny>>)> {
+        self.check_outer(py)?;
         let statement = compile::select(db::dialect(), &self.query);
         let params = statement
             .params
@@ -527,6 +888,7 @@ impl PyQuery {
     }
 
     fn fetch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.check_outer(py)?;
         let database = current(py)?;
         let statement = compile::select(database.dialect, &self.query);
         let query = self.query.clone();
@@ -613,10 +975,7 @@ impl PyQuery {
                     let dict = instance_dict(&instance)?;
                     for annotation in &query.annotations {
                         let cell = cells.next().unwrap_or(Value::Null);
-                        dict.set_item(
-                            &annotation.name,
-                            aggregate_value(py, &annotation.aggregate, cell)?,
-                        )?;
+                        dict.set_item(&annotation.name, annotation_value(py, annotation, cell)?)?;
                     }
                 }
                 list.append(instance)?;
@@ -627,6 +986,7 @@ impl PyQuery {
     }
 
     fn count<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.check_outer(py)?;
         self.refuse_lock(py, "count")?;
         let database = current(py)?;
         let statement = compile::count(database.dialect, &self.query);
@@ -647,6 +1007,7 @@ impl PyQuery {
     }
 
     fn exists<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.check_outer(py)?;
         self.refuse_lock(py, "exists")?;
         let database = current(py)?;
         let statement = compile::exists(database.dialect, &self.query);
@@ -668,6 +1029,7 @@ impl PyQuery {
         py: Python<'py>,
         specs: Vec<AggregateSpec<'py>>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        self.check_outer(py)?;
         self.refuse_lock(py, "aggregate")?;
         let resolved = aggregates(py, &registry(), &self.query, specs)?;
         let database = current(py)?;
@@ -698,6 +1060,7 @@ impl PyQuery {
         py: Python<'py>,
         values: &Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        self.check_outer(py)?;
         let meta = self.meta();
         let mut assignments = Vec::with_capacity(values.len());
         for (key, value) in values.iter() {
@@ -740,6 +1103,7 @@ impl PyQuery {
     }
 
     fn delete<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.check_outer(py)?;
         let meta = self.meta();
         let database = current(py)?;
         let statement =

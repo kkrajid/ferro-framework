@@ -34,6 +34,7 @@ pub(crate) fn open_connection(config: &SqliteConfig) -> Result<Connection, DbErr
             .pragma_update(None, "synchronous", "NORMAL")
             .map_err(map_error)?;
     }
+    crate::functions::register(&connection).map_err(map_error)?;
     connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
     Ok(connection)
 }

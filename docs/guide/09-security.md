@@ -17,7 +17,7 @@ pre-launch checklist is at the end.
 | Cookies | `HttpOnly`, `SameSite=Lax`, `Secure` outside `ferro dev` |
 | Error responses | no tracebacks or internal details outside `ferro dev` |
 | SQL | always bound parameters |
-| Passwords | Argon2id; constant-time checks; no account enumeration by timing |
+| Passwords | Argon2id; constant-time checks; no account enumeration by timing; failed logins throttled (5 per 15 minutes) |
 | Admin | escaped output, strict Content-Security-Policy, staff and permission checks |
 | Metrics | off; when on, only for `metrics_allow` addresses |
 
@@ -98,6 +98,20 @@ it), and `X-Forwarded-Proto: https` marks requests as HTTPS for the cross-origin
 this setting, `X-Forwarded-*` headers are ignored — and every client appears as the proxy, which
 means one shared rate-limit budget. **Always set it behind a proxy.**
 
+## Allowed hosts
+
+List the names your site answers to; requests with any other `Host` header get `400` before
+routing, so links and redirects built from the request never point at a name an attacker
+chose:
+
+```bash
+FERRO_ALLOWED_HOSTS=example.com,.example.com     # .example.com: the domain and its subdomains
+```
+
+Probes (`/healthz`, `/readyz`) and metrics answer whatever the `Host`, so load balancers can
+check servers by address. `ferro run` warns when it serves other machines without
+`allowed_hosts`.
+
 ## HTTPS
 
 Serve HTTPS either from a proxy/load balancer (most deployments) or from Ferro itself:
@@ -112,6 +126,13 @@ never use plain HTTP again:
 ```python
 app = App(hsts=True, hsts_max_age=31_536_000)   # FERRO_HSTS=1
 ```
+
+`hsts_include_subdomains=False` leaves subdomains out (on by default); `hsts_preload=True`
+adds `preload` for the browsers' preload lists (it needs subdomains and at least a year).
+
+Behind a proxy that also accepts plain HTTP, `https_redirect=True` (`FERRO_HTTPS_REDIRECT=1`)
+answers requests the proxy reports as `http` (`X-Forwarded-Proto`, with `trusted_proxies`
+set) with `308` to the same address over HTTPS.
 
 ## Response headers
 
@@ -135,7 +156,9 @@ cookie key, rotate the key at login, end after 30 days or on a password change.
 
 ## Data and queries
 
-- Never build SQL strings: there is no raw-SQL API, and every ORM value is a bound parameter.
+- Never build SQL strings: every ORM value is a bound parameter, and the raw-SQL functions
+  (`db.execute`, `db.fetch`, `Model.objects.raw`) take values only as `%s` parameters —
+  never format user input into their SQL text.
 - Filter by owner in every query that serves user data
   (`Note.objects.get_or_404(pk=id, owner=request.user)`): answering 404 for other people's
   objects also hides that they exist.
@@ -155,6 +178,7 @@ cookie key, rotate the key at login, end after 30 days or on a password change.
 
 - [ ] `ferro run` (never `ferro dev` or `--debug`) in production
 - [ ] HTTPS everywhere; `FERRO_HSTS=1` once it works
+- [ ] `FERRO_ALLOWED_HOSTS` set to your domain names
 - [ ] `FERRO_TRUSTED_PROXIES` set to your proxy/load balancer addresses
 - [ ] PostgreSQL URL with `sslmode=require` (or `verify-full`) for a remote database
 - [ ] rate limits on login, registration and other expensive routes

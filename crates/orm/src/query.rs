@@ -4,7 +4,7 @@ use ferro_database::Value;
 
 use crate::error::OrmError;
 use crate::field::{FieldKind, FieldMeta};
-use crate::lookup::{Lookup, parse_key};
+use crate::lookup::{Lookup, Transform, parse_key};
 use crate::meta::{ModelMeta, is_identifier};
 use crate::path::{FieldPath, Hop, resolve_field, resolve_related};
 use crate::registry::Registry;
@@ -15,6 +15,7 @@ pub enum ArithOp {
     Sub,
     Mul,
     Div,
+    Mod,
 }
 
 impl ArithOp {
@@ -24,6 +25,7 @@ impl ArithOp {
             "-" => Self::Sub,
             "*" => Self::Mul,
             "/" => Self::Div,
+            "%" => Self::Mod,
             _ => return None,
         })
     }
@@ -34,42 +36,224 @@ impl ArithOp {
             Self::Sub => "-",
             Self::Mul => "*",
             Self::Div => "/",
+            Self::Mod => "%",
         }
     }
 }
 
-/// An `F()` expression over fields of the query's model.
-#[derive(Debug, Clone, PartialEq)]
+/// Database functions usable in expressions (Feature 022).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Func {
+    Lower,
+    Upper,
+    Length,
+    Trim,
+    Concat,
+    Coalesce,
+    Greatest,
+    Least,
+    Abs,
+    Now,
+}
+
+impl Func {
+    pub const ALL: [Func; 10] = [
+        Self::Lower,
+        Self::Upper,
+        Self::Length,
+        Self::Trim,
+        Self::Concat,
+        Self::Coalesce,
+        Self::Greatest,
+        Self::Least,
+        Self::Abs,
+        Self::Now,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Lower => "Lower",
+            Self::Upper => "Upper",
+            Self::Length => "Length",
+            Self::Trim => "Trim",
+            Self::Concat => "Concat",
+            Self::Coalesce => "Coalesce",
+            Self::Greatest => "Greatest",
+            Self::Least => "Least",
+            Self::Abs => "Abs",
+            Self::Now => "Now",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.name() == name)
+    }
+
+    /// How many arguments the function takes: `(min, max)`.
+    pub fn arity(self) -> (usize, usize) {
+        match self {
+            Self::Now => (0, 0),
+            Self::Lower | Self::Upper | Self::Length | Self::Trim | Self::Abs => (1, 1),
+            Self::Concat | Self::Coalesce | Self::Greatest | Self::Least => (2, usize::MAX),
+        }
+    }
+}
+
+/// An expression over fields of the query's model: `F()` arithmetic in filters and updates;
+/// functions, `Case`/`When`, literals and subqueries in annotations (Feature 022).
+#[derive(Debug, Clone)]
 pub enum Expr {
     Field(usize),
     Value(Value),
     Binary(Box<Expr>, ArithOp, Box<Expr>),
+    /// A literal of a known kind (PostgreSQL needs the type of a bare parameter).
+    Literal(Value, FieldKind),
+    Func(Func, Vec<Expr>),
+    /// `CASE WHEN <condition> THEN <value> ... ELSE <default> END`.
+    Case(Vec<(Node, Expr)>, Box<Expr>),
+    /// `OuterRef("field")` inside a subquery, before it is attached to its outer query.
+    OuterName(String),
+    /// A field of the outer query's model (resolved [`Expr::OuterName`]).
+    Outer(usize),
+    /// A one-column subquery's first value.
+    Subquery(Box<Query>),
+    Exists(Box<Query>),
+}
+
+impl PartialEq for Expr {
+    /// Structural equality of the arithmetic forms; conditions and subqueries never compare
+    /// equal.
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Field(a), Self::Field(b)) | (Self::Outer(a), Self::Outer(b)) => a == b,
+            (Self::Value(a), Self::Value(b)) => a == b,
+            (Self::Literal(a, x), Self::Literal(b, y)) => a == b && x == y,
+            (Self::Binary(a, x, b), Self::Binary(c, y, d)) => a == c && x == y && b == d,
+            (Self::Func(f, a), Self::Func(g, b)) => f == g && a == b,
+            (Self::OuterName(a), Self::OuterName(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 impl Expr {
-    /// Fields referenced by the expression.
+    /// Fields of the query's own model referenced directly (not inside conditions).
     pub fn fields(&self, out: &mut Vec<usize>) {
         match self {
             Self::Field(index) => out.push(*index),
-            Self::Value(_) => {}
             Self::Binary(left, _, right) => {
                 left.fields(out);
                 right.fields(out);
             }
+            Self::Func(_, args) => args.iter().for_each(|arg| arg.fields(out)),
+            Self::Case(whens, default) => {
+                whens.iter().for_each(|(_, then)| then.fields(out));
+                default.fields(out);
+            }
+            Self::Value(_)
+            | Self::Literal(..)
+            | Self::OuterName(_)
+            | Self::Outer(_)
+            | Self::Subquery(_)
+            | Self::Exists(_) => {}
         }
     }
 
     pub fn is_arithmetic(&self) -> bool {
         matches!(self, Self::Binary(..))
     }
+
+    /// The kind of the expression's value, for converting results.
+    pub fn output_kind(&self, model: &ModelMeta) -> FieldKind {
+        match self {
+            Self::Field(index) => model.fields[*index].kind.clone(),
+            Self::Value(value) | Self::Literal(value, FieldKind::Json) => value_kind(value),
+            Self::Literal(_, kind) => kind.clone(),
+            Self::Binary(left, _, right) => {
+                let left_kind = left.output_kind(model);
+                if is_numeric(&left_kind) {
+                    left_kind
+                } else {
+                    right.output_kind(model)
+                }
+            }
+            Self::Func(func, args) => match func {
+                Func::Lower | Func::Upper | Func::Trim | Func::Concat => FieldKind::Text,
+                Func::Length => FieldKind::Integer,
+                Func::Now => FieldKind::DateTime,
+                Func::Abs | Func::Coalesce | Func::Greatest | Func::Least => args
+                    .iter()
+                    .find(|arg| !matches!(arg, Self::Literal(Value::Null, _)))
+                    .map_or(FieldKind::Text, |arg| arg.output_kind(model)),
+            },
+            Self::Case(whens, default) => whens
+                .iter()
+                .map(|(_, then)| then)
+                .chain(std::iter::once(&**default))
+                .find(|e| !matches!(e, Self::Literal(Value::Null, _)))
+                .map_or(FieldKind::Text, |e| e.output_kind(model)),
+            Self::OuterName(_) | Self::Outer(_) => FieldKind::Text,
+            Self::Subquery(inner) => inner
+                .subquery_field()
+                .map_or(FieldKind::Text, |field| field.kind),
+            Self::Exists(_) => FieldKind::Boolean,
+        }
+    }
+
+    /// Resolves `OuterRef` names inside subqueries against the outer model.
+    fn resolve_outer(&mut self, outer: &ModelMeta) -> Result<(), OrmError> {
+        match self {
+            Self::Subquery(inner) | Self::Exists(inner) => inner.resolve_outer(outer),
+            Self::Binary(left, _, right) => {
+                left.resolve_outer(outer)?;
+                right.resolve_outer(outer)
+            }
+            Self::Func(_, args) => args.iter_mut().try_for_each(|arg| arg.resolve_outer(outer)),
+            Self::Case(whens, default) => {
+                for (_, then) in whens.iter_mut() {
+                    then.resolve_outer(outer)?;
+                }
+                default.resolve_outer(outer)
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+fn value_kind(value: &Value) -> FieldKind {
+    match value {
+        Value::Integer(_) => FieldKind::BigInteger,
+        Value::Real(_) => FieldKind::Float,
+        Value::Decimal(text) => FieldKind::Decimal {
+            max_digits: 38,
+            decimal_places: u8::try_from(text.split_once('.').map_or(0, |(_, f)| f.len()))
+                .unwrap_or(0),
+        },
+        _ => FieldKind::Text,
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Operand {
     Value(Value),
     List(Vec<Value>),
     Flag(bool),
     Expr(Expr),
+    /// `field__in=<queryset>`: the values of a one-column query.
+    Subquery(Box<Query>),
+}
+
+impl PartialEq for Operand {
+    /// Subquery operands are never equal (queries have no value equality).
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Value(a), Self::Value(b)) => a == b,
+            (Self::List(a), Self::List(b)) => a == b,
+            (Self::Flag(a), Self::Flag(b)) => a == b,
+            (Self::Expr(a), Self::Expr(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// What a condition compares: a field (possibly across relations) or an annotation.
@@ -84,6 +268,8 @@ pub struct Condition {
     pub target: Target,
     pub lookup: Lookup,
     pub operand: Operand,
+    /// Applied to the target's value before comparing (`__year`, JSON key paths).
+    pub transform: Option<Transform>,
 }
 
 impl Condition {
@@ -119,25 +305,47 @@ impl Condition {
                 lookup.name()
             ))
         };
+        let text_like = lookup.is_text() || lookup.is_regex() || lookup == Lookup::HasKey;
         let (lookup, operand) = match (lookup, operand) {
             (Lookup::Exact, Operand::Value(Value::Null)) => (Lookup::IsNull, Operand::Flag(true)),
             (Lookup::IsNull, operand @ Operand::Flag(_)) => (Lookup::IsNull, operand),
             (Lookup::IsNull, _) => return Err(error("needs True or False")),
-            (Lookup::In, operand @ Operand::List(_)) => (Lookup::In, operand),
-            (Lookup::In, _) => return Err(error("needs a list of values")),
+            (Lookup::In, operand @ (Operand::List(_) | Operand::Subquery(_))) => {
+                (Lookup::In, operand)
+            }
+            (Lookup::In, _) => return Err(error("needs a list of values or a queryset")),
+            (Lookup::Range, Operand::List(values)) => {
+                if values.len() != 2 || values.contains(&Value::Null) {
+                    return Err(error("needs two values (low, high)"));
+                }
+                (Lookup::Range, Operand::List(values))
+            }
+            (Lookup::Range, _) => return Err(error("needs two values (low, high)")),
+            (Lookup::HasKeys | Lookup::HasAnyKeys, Operand::List(values)) => {
+                if values.is_empty() || !values.iter().all(|v| matches!(v, Value::Text(_))) {
+                    return Err(error("needs a list of strings"));
+                }
+                (lookup, Operand::List(values))
+            }
+            (Lookup::HasKeys | Lookup::HasAnyKeys, _) => {
+                return Err(error("needs a list of strings"));
+            }
+            (_, Operand::Subquery(_)) => {
+                return Err(error(&format!("cannot take a queryset; use '{name}__in'")));
+            }
             (_, Operand::List(_)) => {
                 return Err(error(&format!("cannot take a list; use '{name}__in'")));
             }
             (_, Operand::Flag(_)) => return Err(error("needs a value")),
             (lookup, operand @ Operand::Expr(_)) => {
-                if lookup.is_text() {
+                if text_like || lookup.is_json_key() {
                     return Err(error("cannot compare with an F() expression"));
                 }
                 (lookup, operand)
             }
             (_, Operand::Value(Value::Null)) => return Err(error("cannot compare with None")),
             (lookup, Operand::Value(value)) => {
-                if lookup.is_text() && !matches!(value, Value::Text(_)) {
+                if text_like && !matches!(value, Value::Text(_)) {
                     return Err(error("needs a string"));
                 }
                 (lookup, Operand::Value(value))
@@ -147,7 +355,14 @@ impl Condition {
             target,
             lookup,
             operand,
+            transform: None,
         })
+    }
+
+    /// The condition with a transform of the target's value.
+    pub fn transformed(mut self, transform: Option<Transform>) -> Self {
+        self.transform = transform;
+        self
     }
 
     pub fn hops(&self) -> &[Hop] {
@@ -336,12 +551,41 @@ impl Aggregate {
     }
 }
 
+/// What an annotation computes.
+#[derive(Debug, Clone)]
+pub enum AnnotationValue {
+    Aggregate(Aggregate),
+    /// A per-row expression (functions, `Case`, subqueries) and the kind of its value.
+    Expr(Expr, FieldKind),
+}
+
 #[derive(Debug, Clone)]
 pub struct Annotation {
     pub name: String,
-    pub aggregate: Aggregate,
+    pub value: AnnotationValue,
     /// Computed per group of a `values()` query instead of per record.
     pub grouped: bool,
+}
+
+impl Annotation {
+    /// A field describing the annotation's value (for converting operands and results).
+    pub fn output_field(&self) -> FieldMeta {
+        match &self.value {
+            AnnotationValue::Aggregate(aggregate) => aggregate.output_field(&self.name),
+            AnnotationValue::Expr(_, kind) => {
+                let mut field = FieldMeta::column(&self.name, kind.clone());
+                field.null = true;
+                field
+            }
+        }
+    }
+
+    pub fn aggregate(&self) -> Option<&Aggregate> {
+        match &self.value {
+            AnnotationValue::Aggregate(aggregate) => Some(aggregate),
+            AnnotationValue::Expr(..) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -389,6 +633,8 @@ pub struct Query {
     pub values: Option<Values>,
     /// `select_for_update()`: lock the fetched rows of the model until the transaction ends.
     pub lock: Option<Lock>,
+    /// `distinct()`: leave out duplicate rows.
+    pub distinct: bool,
 }
 
 fn same_path(a: &[Hop], b: &[Hop]) -> bool {
@@ -407,6 +653,30 @@ impl Query {
             annotations: Vec::new(),
             values: None,
             lock: None,
+            distinct: false,
+        }
+    }
+
+    /// `SELECT DISTINCT`: duplicate rows (from joins or `values()`) appear once.
+    pub fn distinct(&self) -> Self {
+        let mut next = self.clone();
+        next.distinct = true;
+        next
+    }
+
+    /// The single column this query selects when used as `field__in=<queryset>`: its
+    /// `values_list()` field, or the model's primary key.
+    pub fn subquery_field(&self) -> Result<FieldMeta, OrmError> {
+        match &self.values {
+            None => Ok(self.model.pk_field().clone()),
+            Some(values) if values.fields.len() == 1 => match &values.fields[0] {
+                Selected::Field(path) => Ok(path.meta().clone()),
+                Selected::Annotation(index) => Ok(self.annotations[*index].output_field()),
+            },
+            Some(_) => Err(OrmError(format!(
+                "{}: a queryset used with __in must select one field (values_list('field'))",
+                self.model.label
+            ))),
         }
     }
 
@@ -634,7 +904,7 @@ impl Query {
             }
             next.annotations.push(Annotation {
                 name,
-                aggregate,
+                value: AnnotationValue::Aggregate(aggregate),
                 grouped,
             });
         }
@@ -647,6 +917,113 @@ impl Query {
             }
         }
         Ok(next)
+    }
+
+    /// Adds a per-row expression annotation (Feature 022). After `values()` it joins the
+    /// selected columns; it cannot be combined with grouped aggregates.
+    pub fn annotate_expr(&self, name: &str, mut expr: Expr) -> Result<Self, OrmError> {
+        if self.is_locking() {
+            return Err(self.lock_error());
+        }
+        if self.is_grouped() {
+            return Err(OrmError(format!(
+                "{}: expression annotations cannot follow a grouped annotate()",
+                self.model.label
+            )));
+        }
+        self.check_new_name(name)?;
+        expr.resolve_outer(&self.model)?;
+        let kind = expr.output_kind(&self.model);
+        let mut next = self.clone();
+        next.annotations.push(Annotation {
+            name: name.to_string(),
+            value: AnnotationValue::Expr(expr, kind),
+            grouped: false,
+        });
+        if let Some(values) = &mut next.values {
+            values.names.push(name.to_string());
+            values
+                .fields
+                .push(Selected::Annotation(next.annotations.len() - 1));
+        }
+        Ok(next)
+    }
+
+    /// The first `OuterRef` name left unresolved: the query uses `OuterRef` without being a
+    /// `Subquery()`/`Exists()` of another query.
+    pub fn unresolved_outer(&self) -> Option<String> {
+        fn in_expr(expr: &Expr) -> Option<String> {
+            match expr {
+                Expr::OuterName(name) => Some(name.clone()),
+                Expr::Binary(left, _, right) => in_expr(left).or_else(|| in_expr(right)),
+                _ => None,
+            }
+        }
+        fn in_node(node: &Node) -> Option<String> {
+            match node {
+                Node::Leaf(condition) => match &condition.operand {
+                    Operand::Expr(expr) => in_expr(expr),
+                    _ => None,
+                },
+                Node::And(children) | Node::Or(children) => children.iter().find_map(in_node),
+                Node::Not(child) => in_node(child),
+            }
+        }
+        self.filters.iter().find_map(in_node)
+    }
+
+    /// Resolves `OuterRef` names in this (inner) query's conditions against `outer`.
+    pub fn resolve_outer(&mut self, outer: &ModelMeta) -> Result<(), OrmError> {
+        fn walk(node: &mut Node, inner: &ModelMeta, outer: &ModelMeta) -> Result<(), OrmError> {
+            match node {
+                Node::Leaf(condition) => {
+                    if let Operand::Expr(expr) = &mut condition.operand {
+                        resolve(expr, inner, outer)?;
+                    }
+                    Ok(())
+                }
+                Node::And(children) | Node::Or(children) => children
+                    .iter_mut()
+                    .try_for_each(|child| walk(child, inner, outer)),
+                Node::Not(child) => walk(child, inner, outer),
+            }
+        }
+        fn resolve(expr: &mut Expr, inner: &ModelMeta, outer: &ModelMeta) -> Result<(), OrmError> {
+            match expr {
+                Expr::OuterName(name) => {
+                    if inner.table == outer.table {
+                        return Err(OrmError(format!(
+                            "{}: OuterRef('{name}') to the same model is not supported",
+                            outer.label
+                        )));
+                    }
+                    let index = if name == "pk" {
+                        Some(outer.pk)
+                    } else {
+                        outer.field(name)
+                    };
+                    let index = index.ok_or_else(|| {
+                        OrmError(format!(
+                            "{} has no field '{name}' (OuterRef); fields: {}",
+                            outer.label,
+                            outer.field_names().join(", ")
+                        ))
+                    })?;
+                    *expr = Expr::Outer(index);
+                    Ok(())
+                }
+                Expr::Binary(left, _, right) => {
+                    resolve(left, inner, outer)?;
+                    resolve(right, inner, outer)
+                }
+                _ => Ok(()),
+            }
+        }
+        let inner = self.model.clone();
+        for node in &mut self.filters {
+            walk(node, &inner, outer)?;
+        }
+        Ok(())
     }
 
     /// Returns rows as dicts / tuples / single values of the named fields (all fields by

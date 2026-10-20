@@ -250,6 +250,12 @@ fn settings_from_dict(values: &Bound<'_, PyDict>) -> PyResult<Settings> {
             "rate_limit" => settings.rate_limit = value.extract().map_err(invalid)?,
             "hsts" => settings.hsts = value.extract().map_err(invalid)?,
             "hsts_max_age" => settings.hsts_max_age = value.extract().map_err(invalid)?,
+            "hsts_include_subdomains" => {
+                settings.hsts_include_subdomains = value.extract().map_err(invalid)?;
+            }
+            "hsts_preload" => settings.hsts_preload = value.extract().map_err(invalid)?,
+            "allowed_hosts" => settings.allowed_hosts = value.extract().map_err(invalid)?,
+            "https_redirect" => settings.https_redirect = value.extract().map_err(invalid)?,
             "content_security_policy" => {
                 settings.content_security_policy = value.extract().map_err(invalid)?;
             }

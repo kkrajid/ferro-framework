@@ -255,6 +255,79 @@ class RelatedManager(_Delegating):
         _require_pk(self.instance, self.accessor)
         return await self.model.objects.create(**values)
 
+    def _check(self, objects: Iterable[Any]) -> list[Any]:
+        objects = list(objects)
+        for obj in objects:
+            if type(obj) is not self.model:
+                raise TypeError(
+                    f"{self.accessor}: expected {self.model.__name__} instances, "
+                    f"got {type(obj).__name__}"
+                )
+            if obj.pk is None:
+                raise ValueError(f"{self.accessor}: {obj!r} is not saved yet")
+        return objects
+
+    def _nullable(self, method: str) -> None:
+        if not self.field.null:
+            raise TypeError(
+                f"{self.accessor}.{method}() needs a nullable foreign key "
+                f"({self.model.__name__}.{self.field.name} has null=False); delete the rows instead"
+            )
+
+    def _forget(self) -> None:
+        cache = self.instance.__dict__.get("_related")
+        if cache is not None:
+            cache.pop(self.accessor, None)
+
+    async def add(self, *objects: Any) -> None:
+        """Points the saved ``objects`` at this record (one UPDATE)."""
+        pk = _require_pk(self.instance, self.accessor)
+        objects = self._check(objects)
+        if objects:
+            await self.model.objects.filter(pk__in=[o.pk for o in objects]).update(
+                **{self.field.name: pk}
+            )
+            for obj in objects:
+                obj.__dict__[self.field.attname] = pk
+                obj.__dict__.get("_related", {}).pop(self.field.name, None)
+        self._forget()
+
+    async def remove(self, *objects: Any) -> None:
+        """Unlinks ``objects`` from this record (their key becomes NULL)."""
+        self._nullable("remove")
+        pk = _require_pk(self.instance, self.accessor)
+        objects = self._check(objects)
+        if objects:
+            await self.model.objects.filter(
+                pk__in=[o.pk for o in objects], **{self.field.name: pk}
+            ).update(**{self.field.name: None})
+            for obj in objects:
+                obj.__dict__[self.field.attname] = None
+        self._forget()
+
+    async def clear(self) -> None:
+        """Unlinks every related row (their key becomes NULL)."""
+        self._nullable("clear")
+        pk = _require_pk(self.instance, self.accessor)
+        await self.model.objects.filter(**{self.field.name: pk}).update(**{self.field.name: None})
+        self._forget()
+
+    async def set(self, objects: Iterable[Any]) -> None:
+        """Makes the related rows exactly ``objects`` (one transaction): others are unlinked
+        (nullable keys) and the given ones added."""
+        from ferro.db import transaction
+
+        self._nullable("set")
+        pk = _require_pk(self.instance, self.accessor)
+        objects = self._check(objects)
+        async with transaction():
+            await (
+                self.model.objects.filter(**{self.field.name: pk})
+                .exclude(pk__in=[o.pk for o in objects])
+                .update(**{self.field.name: None})
+            )
+            await self.add(*objects)
+
     def __repr__(self) -> str:
         return f"<RelatedManager {type(self.instance).__name__}.{self.accessor}>"
 
@@ -497,6 +570,7 @@ class ManyRelatedManager(_Delegating):
         values = self._link_values(through_defaults)
         if not keys:
             return
+        await self._changed("pre_add", set(keys))
         own, other = self.own_side, self.other_side
         if self.relation.auto_created:
             links = [self.through(**{f"{own}_id": pk, f"{other}_id": key}) for key in keys]
@@ -516,20 +590,39 @@ class ManyRelatedManager(_Delegating):
             if links:
                 await self.through.objects.bulk_create(links)
         self._forget()
+        await self._changed("post_add", set(keys))
+
+    async def _changed(self, action: str, keys: set[Any] | None) -> None:
+        from ferro import signals
+
+        if signals.m2m_changed._receivers:
+            await signals.m2m_changed.send(
+                self.through,
+                instance=self.instance,
+                action=action,
+                model=self.model,
+                pk_set=keys,
+                reverse=self.own_side == self.relation.to_name,
+            )
 
     async def remove(self, *objects: Any) -> None:
         pk = _require_pk(self.instance, self.accessor)
         keys = self._keys(objects)
         if keys:
+            await self._changed("pre_remove", set(keys))
             await self.through.objects.filter(
                 **{self.own_side: pk, f"{self.other_side}__in": keys}
             ).delete()
+            self._forget()
+            await self._changed("post_remove", set(keys))
         self._forget()
 
     async def clear(self) -> None:
         pk = _require_pk(self.instance, self.accessor)
+        await self._changed("pre_clear", None)
         await self.through.objects.filter(**{self.own_side: pk}).delete()
         self._forget()
+        await self._changed("post_clear", None)
 
     async def set(
         self, objects: Iterable[Any], *, through_defaults: dict[str, Any] | None = None
@@ -547,9 +640,7 @@ class ManyRelatedManager(_Delegating):
             )
             stale = [key for key in current if key not in set(wanted)]
             if stale:
-                await self.through.objects.filter(
-                    **{self.own_side: pk, f"{self.other_side}__in": stale}
-                ).delete()
+                await self.remove(*stale)
             missing = [key for key in wanted if key not in set(current)]
             if missing:
                 await self.add(*missing, through_defaults=through_defaults)

@@ -40,6 +40,8 @@ server — no Gunicorn, Uvicorn or Daphne needed.
     chat, notifications, progress, large downloads, broadcast across processes
 13. [Request and response models with Pydantic](guide/17-pydantic.md) — validated bodies,
     response models from ORM objects, 422 errors
+14. [Signals, on_commit and lifecycle hooks](guide/18-signals-and-hooks.md) — react to saves,
+    logins and requests; side effects after commit; startup and shutdown
 
 ## Running in production
 

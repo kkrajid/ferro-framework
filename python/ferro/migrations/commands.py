@@ -187,6 +187,9 @@ async def migrate(
         done.append(current.name)
         if after:
             after(current.name)
+    from ferro import signals
+
+    await signals.post_migrate.send(None, applied=list(done))
     return done
 
 

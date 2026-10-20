@@ -141,7 +141,9 @@ await cheap.exclude(stock=0).count()
 | `select_related("fk", "fk__fk")` | QuerySet loading foreign keys in the same query |
 | `prefetch_related("reverse_or_m2m", ...)` | QuerySet loading relations with one extra query per level |
 | `values("f", ...)`, `values_list("f", ..., flat=False)` | dicts / tuples / single values |
-| `annotate(n=Count("items"))` | QuerySet with computed values |
+| `annotate(n=Count("items"), label=Lower("name"))` | QuerySet with computed values ([expressions](#expressions)) |
+| `distinct()` | QuerySet without duplicate rows |
+| `none()` | QuerySet matching nothing |
 | `select_for_update(nowait=False, skip_locked=False)` | QuerySet that locks its rows |
 | `await qs` | list |
 | `await qs.get(...)`, `await qs.get_or_404(...)` | one object |
@@ -150,6 +152,11 @@ await cheap.exclude(stock=0).count()
 | `await qs.aggregate(total=Sum("price"))` | `dict` |
 | `await qs.update(stock=0)`, `await qs.delete()` | number of rows |
 | `await Model.objects.create(**values)` | saved object |
+| `await qs.get_or_create(defaults=None, **lookups)` | `(object, created)` |
+| `await qs.update_or_create(defaults=None, create_defaults=None, **lookups)` | `(object, created)` |
+| `await qs.in_bulk([1, 2], field_name="pk")` | `{key: object}` |
+| `await qs.explain()` | the database's query plan, as text |
+| `await Model.objects.raw(sql, params)` | objects from your own SQL ([raw SQL](#raw-sql)) |
 | `await Model.objects.bulk_create(objs, batch_size=None, ignore_conflicts=False)` | the objects, keys set |
 | `await Model.objects.bulk_update(objs, fields=["price"])` | number of rows |
 | `async for obj in qs.iterator(chunk_size=1000)` | objects, fetched in chunks |
@@ -169,10 +176,29 @@ fetched in one query.
 | Lookup | Meaning |
 |---|---|
 | `exact` (default) | `=`, or `IS NULL` for `None` |
-| `iexact`, `contains`, `icontains`, `startswith`, `endswith` | text matching (`%`/`_` in the value are literal) |
+| `iexact`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith` | text matching (`%`/`_` in the value are literal) |
+| `regex`, `iregex` | regular expression (PostgreSQL's syntax there; Rust's `regex` syntax on SQLite) |
 | `gt`, `gte`, `lt`, `lte` | comparisons |
-| `in` | `field__in=[1, 2, 3]` |
+| `range` | `price__range=(10, 20)` — `BETWEEN`, both ends included |
+| `in` | `field__in=[1, 2, 3]`, or a queryset: `author__in=Author.objects.filter(...)` (one column: `values_list("f")` or the primary key) |
 | `isnull` | `field__isnull=True` |
+
+Dates and times can be compared by part — `created__year=2026`, `created__month__gte=6`,
+`created__date=date(2026, 10, 20)` — with `year`, `quarter`, `month`, `day`, `week_day`
+(1 = Sunday … 7 = Saturday), `hour`, `minute`, `second` and `date`. Date-times are read in UTC.
+
+**JSON fields** are queried by key path; numbers in the path are array indexes:
+
+```python
+await Writer.objects.filter(profile__city="Kochi")
+await Writer.objects.filter(profile__score__gte=5, profile__tags__0="poetry")
+await Writer.objects.filter(profile__address__city__icontains="koc")
+await Writer.objects.filter(profile__has_key="tags")              # has_keys=[...], has_any_keys=[...]
+await Writer.objects.filter(profile__contains={"city": "Kochi"})  # containment, as PostgreSQL's @>
+await Writer.objects.filter(profile__awards__isnull=True)         # key missing or JSON null
+```
+
+Keys are sent as parameters, never as SQL text.
 
 On SQLite `iexact`/`icontains` fold ASCII letters only; PostgreSQL folds all Unicode letters
 when the database has a Unicode locale (the default of managed services and of `initdb` on a
@@ -184,9 +210,56 @@ UTF-8 system; a database created with the `C` locale folds ASCII only).
 from ferro.models import F, Q
 
 await Product.objects.filter(Q(price__lt=100) | Q(tags__name="sale"), ~Q(stock=0))
+await Product.objects.filter(Q(featured=True) ^ Q(on_sale=True))      # exactly one of them
 await Product.objects.filter(price__gt=F("cost") * 2)
 await Product.objects.filter(pk=7).update(stock=F("stock") - 1)     # atomic in SQL
 ```
+
+`F()` supports `+ - * / %`.
+
+### Expressions
+
+Computed per row with `annotate()`, then usable in `filter()`, `order_by()` and `values()`:
+
+```python
+from ferro.models import (
+    Case, Coalesce, Concat, Exists, F, Length, Lower, OuterRef, Subquery, Value, When,
+)
+
+await Writer.objects.annotate(
+    key=Lower("name"),                                            # strings name fields
+    contact=Coalesce("email", Value("no email")),                 # Value() for constants
+    label=Concat("name", Value(" <"), "email", Value(">")),
+    size=Length("name"),
+    tier=Case(
+        When(novels__pages__gt=300, then=Value("epic")),
+        When(Q(born__year__lt=1950) | Q(born__isnull=True), then=Value("classic")),
+        default=Value("modern"),
+    ),
+    published=Exists(Novel.objects.filter(writer=OuterRef("pk"))),
+    latest=Subquery(
+        Novel.objects.filter(writer=OuterRef("pk")).order_by("-published").values_list("title")
+    ),
+).filter(published=True).order_by("key")
+```
+
+| Expression | Value |
+|---|---|
+| `Value(x)` | a constant |
+| `Lower`, `Upper`, `Trim`, `Length`, `Abs` | text and number functions |
+| `Concat(a, b, ...)` | joined text (NULL parts count as empty) |
+| `Coalesce(a, b, ...)` | the first value that is not NULL |
+| `Greatest(...)`, `Least(...)` | largest / smallest (PostgreSQL ignores NULLs; SQLite returns NULL if any is NULL) |
+| `Now()` | the database's current date-time (UTC) |
+| `Case(When(cond, then=...), ..., default=...)` | the first matching branch |
+| `Exists(qs)` | `True` when the queryset finds a row |
+| `Subquery(qs)` | the first value of a one-column queryset (`values_list("f")`, or the primary key) |
+| `OuterRef("field")` | inside `Exists`/`Subquery` filters: a field of the outer row |
+
+Limits: `OuterRef` cannot point at the same model as the subquery; expression annotations
+cannot be combined with grouped `values().annotate()` aggregates, and `values()` cannot follow
+a grouped `annotate()` (so a `Subquery` cannot select an aggregate); `F()` inside expressions
+names the model's own fields (no relations).
 
 ### Aggregation
 
@@ -244,6 +317,10 @@ await Category.objects.filter(products__price__gt=1000)  # each category once
 await phones.products.all()                              # reverse manager
 await phones.products.filter(stock=0).count()
 await phones.products.create(name="X2")
+await phones.products.add(x3, x4)                        # point saved rows here (one UPDATE)
+await phones.products.remove(x3)                         # nullable keys: set to NULL
+await phones.products.set([x4])                          # exactly these (nullable keys)
+await phones.products.clear()
 
 await phone.tags.add(sale, new)                          # instances or keys
 await phone.tags.remove(sale)
@@ -306,6 +383,30 @@ Each concrete subclass gets its own copy of the fields (parents first) and its o
 `%(class)s` becomes the subclass's snake_case name. Set an inherited field to `None` to drop it,
 redefine it to replace it. Inheriting from a concrete (non-abstract) model is not supported.
 
+## Raw SQL
+
+For queries the ORM cannot express, write SQL with `%s` for each parameter (`%%` for a
+literal `%`). Values always travel as parameters; never format them into the text.
+
+```python
+from ferro import db
+
+await db.execute("UPDATE product SET stock = stock - %s WHERE id = %s", [2, product_id])
+rows = await db.fetch("SELECT category_id, SUM(stock) AS stock FROM product GROUP BY 1")
+products = await Product.objects.raw(
+    "SELECT p.*, ts_rank(p.search, q) AS rank FROM product p, plainto_tsquery(%s) q "
+    "WHERE p.search @@ q ORDER BY rank DESC",
+    [text],
+)
+```
+
+- `db.execute()` returns the number of rows affected; `db.fetch()` returns dicts with plain
+  values (dates, times and JSON as text); `raw()` returns model instances — select every
+  column of the model; extra columns (`rank`) become attributes.
+- Inside `transaction()` they join the transaction.
+- Table and column names cannot be parameters: write them in the SQL yourself, never from
+  user input.
+
 ## Transactions
 
 ```python
@@ -330,6 +431,9 @@ async def place_order(...): ...
 - SQLite: a transaction holds the database write lock from its start, so keep them short.
   PostgreSQL: a failed statement aborts the transaction; wrap risky statements in a nested
   `transaction()` to recover.
+
+Side effects that must wait for the commit (e-mails, jobs) go in
+[`await on_commit(callback)`](18-signals-and-hooks.md#after-the-commit-on_commit).
 
 ### Isolation levels
 

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import functools
+import inspect
+import logging
 from collections.abc import Awaitable, Callable, Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +22,10 @@ __all__ = [
     "connect",
     "create_tables",
     "disconnect",
+    "execute",
+    "fetch",
     "is_connected",
+    "on_commit",
     "reset_sequences",
     "transaction",
 ]
@@ -80,6 +86,61 @@ async def create_tables(
 
 _ISOLATION_LEVELS = ("read committed", "repeatable read", "serializable")
 
+# Callbacks waiting for the current transaction to commit: one list per open block (outermost
+# first); a savepoint's list joins its parent's when it is released (Feature 024).
+_pending: contextvars.ContextVar[list[list[tuple[Callable[[], Any], bool]]] | None] = (
+    contextvars.ContextVar("ferro_on_commit", default=None)
+)
+
+
+async def _run_callback(callback: Callable[[], Any], robust: bool) -> None:
+    try:
+        result = callback()
+        if inspect.isawaitable(result):
+            await result
+    except Exception:
+        if not robust:
+            raise
+        logging.getLogger("ferro.db").exception("on_commit callback %r failed", callback)
+
+
+async def on_commit(callback: Callable[[], Any], *, robust: bool = False) -> None:
+    """Runs ``callback`` (sync or ``async``) after the current transaction commits — never when
+    it rolls back, and not for a nested block that rolls back. Outside a transaction it runs at
+    once. Use it for side effects that must only follow committed data::
+
+        async with transaction():
+            order = await Order.objects.create(...)
+            await on_commit(lambda: send_confirmation(order.pk))
+
+    With ``robust=True`` an exception is logged and the following callbacks still run;
+    otherwise it propagates from the end of the ``async with`` (the data is committed).
+    """
+    stack = _pending.get()
+    current = _ferro.transaction_context.get()
+    if stack is None or current is None or current.closed:
+        await _run_callback(callback, robust)
+        return
+    stack[-1].append((callback, robust))
+
+
+async def execute(sql: str, params: Iterable[Any] = ()) -> int:
+    """Runs hand-written SQL that returns no rows; returns the number of rows affected.
+
+    ``%s`` marks each parameter (``%%`` a literal ``%``); values go in ``params``, never into
+    ``sql``. Inside ``transaction()`` it joins the transaction::
+
+        await db.execute("UPDATE product SET stock = stock - %s WHERE id = %s", [2, pid])
+    """
+    return await _ferro.raw_execute(sql, list(params))
+
+
+async def fetch(sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
+    """Runs a hand-written query; returns its rows as dicts (column name → value). Values come
+    back in plain form (numbers, text — dates and times as ISO text, JSON as text); use
+    ``Model.objects.raw()`` for model instances."""
+    return await _ferro.raw_fetch(sql, list(params))
+
 
 async def reset_sequences(
     models: Iterable[type[Model]] | None = None,
@@ -137,7 +198,8 @@ class transaction:
                 session.close()
                 raise
             token = _ferro.transaction_context.set(session)
-            self._entries.append((session, token, None))
+            hooks = _pending.set([[]])
+            self._entries.append((session, (token, hooks), None))
         else:
             if self._isolation is not None:
                 raise TransactionError(
@@ -146,26 +208,42 @@ class transaction:
                 )
             number = current.next_savepoint()
             await current.savepoint(number)
+            stack = _pending.get()
+            if stack is not None:
+                stack.append([])
             self._entries.append((current, None, number))
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        session, token, savepoint = self._entries.pop()
+        session, tokens, savepoint = self._entries.pop()
         if savepoint is not None:
+            stack = _pending.get()
+            inner = stack.pop() if stack and len(stack) > 1 else []
             if exc_type is None:
                 await session.release(savepoint)
+                if stack:
+                    stack[-1].extend(inner)
             else:
                 await session.rollback_to(savepoint)
             return False
+        token, hooks = tokens
+        callbacks = (_pending.get() or [[]])[0]
+        committed = False
         try:
             if exc_type is None:
                 await session.commit()
+                committed = True
             else:
                 with contextlib.suppress(Exception):
                     await session.rollback()
         finally:
             _ferro.transaction_context.reset(token)
+            _pending.reset(hooks)
             session.close()
+        if committed:
+            # Outside the finished transaction: callbacks' own queries autocommit.
+            for callback, robust in callbacks:
+                await _run_callback(callback, robust)
         return False
 
     def __call__[**P, R](self, func: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:

@@ -18,12 +18,12 @@ pub(crate) struct OrmTypes {
     /// `ferro.models.Model`, to recognize instances passed as lookup values.
     pub(crate) model_base: Py<PyType>,
     pub(crate) configuration_error: Py<PyType>,
-    date: Py<PyType>,
-    datetime: Py<PyType>,
-    time: Py<PyType>,
+    pub(crate) date: Py<PyType>,
+    pub(crate) datetime: Py<PyType>,
+    pub(crate) time: Py<PyType>,
     utc: Py<PyAny>,
     pub(crate) decimal: Py<PyType>,
-    uuid: Py<PyType>,
+    pub(crate) uuid: Py<PyType>,
     pub(crate) get_running_loop: Py<PyAny>,
 }
 

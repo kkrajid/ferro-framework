@@ -57,6 +57,13 @@ pub(crate) struct PyModelMeta {
     cls: Py<PyAny>,
 }
 
+impl PyModelMeta {
+    /// The model class.
+    pub(crate) fn class(&self, py: Python<'_>) -> Py<PyAny> {
+        self.cls.clone_ref(py)
+    }
+}
+
 #[pymethods]
 impl PyModelMeta {
     #[getter]

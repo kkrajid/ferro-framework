@@ -36,6 +36,18 @@ def pytest_pyfunc_call(pyfuncitem: pytest.Function) -> bool | None:
     return None
 
 
+@pytest.fixture(autouse=True)
+def _no_login_throttle() -> Iterator[None]:
+    """Failed logins across unrelated tests must not lock users out (Feature 023); tests of the
+    throttle turn it on themselves."""
+    from ferro.auth import sessions
+
+    saved = dict(sessions._throttle)
+    sessions._throttle["attempts"] = 0
+    yield
+    sessions._throttle.update(saved)
+
+
 @pytest.fixture
 def serve() -> Iterator[Callable[..., httpx.Client]]:
     """Serves an App in-process on an ephemeral port and returns an HTTP client for it."""

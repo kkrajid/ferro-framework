@@ -66,8 +66,12 @@ allowed).
 | `trusted_proxies` | none | IPs / CIDR ranges | proxies whose `X-Forwarded-For` / `X-Forwarded-Proto` are believed |
 | `rate_limit` | none | `N/second`, `N/minute`, `N/hour`, `N/day` | app-wide limit per client |
 | `cors` | none | `ferro.CORS(...)` — `App(cors=...)` only | cross-origin browser access |
+| `allowed_hosts` | none (any host) | names: `example.com`, `.example.com` (and subdomains), `*` | `Host` headers this site answers; others get 400 |
+| `https_redirect` | off | bool | redirect plain-HTTP requests (per `X-Forwarded-Proto` from a trusted proxy) to HTTPS with 308 |
 | `hsts` | off | bool | send `Strict-Transport-Security` |
 | `hsts_max_age` | `31536000` | 0 – 2 years, seconds | HSTS duration |
+| `hsts_include_subdomains` | on | bool | `includeSubDomains` in the HSTS header |
+| `hsts_preload` | off | bool | `preload` (needs `hsts_include_subdomains` and at least one year) |
 | `content_security_policy` | none | header value | send `Content-Security-Policy` |
 
 ## Route options

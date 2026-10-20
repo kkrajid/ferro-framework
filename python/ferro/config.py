@@ -206,6 +206,10 @@ _SPECS: dict[str, _Spec] = {
     "cors": _Spec(_cors, lambda mode: None),
     "hsts": _Spec(_bool, lambda mode: False),
     "hsts_max_age": _Spec(_int(0, 2 * 31_536_000), lambda mode: 31_536_000),
+    "hsts_include_subdomains": _Spec(_bool, lambda mode: True),
+    "hsts_preload": _Spec(_bool, lambda mode: False),
+    "allowed_hosts": _Spec(_strings, lambda mode: ()),
+    "https_redirect": _Spec(_bool, lambda mode: False),
     "content_security_policy": _Spec(_optional_text, lambda mode: None),
     "health_path": _Spec(_path, lambda mode: "/healthz"),
     "ready_path": _Spec(_path, lambda mode: "/readyz"),
@@ -244,6 +248,10 @@ class Settings:
     cors: Any = None
     hsts: bool = False
     hsts_max_age: int = 31_536_000
+    hsts_include_subdomains: bool = True
+    hsts_preload: bool = False
+    allowed_hosts: tuple[str, ...] = ()
+    https_redirect: bool = False
     content_security_policy: str | None = None
     processes: int = 1
     health_path: str = "/healthz"

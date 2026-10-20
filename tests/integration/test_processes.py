@@ -96,8 +96,12 @@ def interrupt(process: subprocess.Popen) -> None:
 
 
 def pids(base: str, count: int = 300) -> set[int]:
-    with ThreadPoolExecutor(32) as pool, httpx.Client(timeout=10) as client:
-        return set(pool.map(lambda _: client.get(f"{base}/burn").json()["pid"], range(count)))
+    # A connection per request: a client shared by 32 threads occasionally failed on Windows
+    # with WinError 10038 (socket closed under another thread) without any server error.
+    with ThreadPoolExecutor(32) as pool:
+        return set(
+            pool.map(lambda _: httpx.get(f"{base}/burn", timeout=10).json()["pid"], range(count))
+        )
 
 
 def alive(pid: int) -> bool:

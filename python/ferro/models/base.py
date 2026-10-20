@@ -453,18 +453,35 @@ class Model(metaclass=ModelBase):
         self.__dict__[type(self)._meta.pk_name] = value
 
     async def save(self) -> None:
-        """Inserts a new row or updates the existing one."""
-        meta = type(self)._meta
-        if self._persisted and self.pk is not None and await _ferro.update_instance(meta, self):
-            return
-        await _ferro.insert(meta, self)
+        """Inserts a new row or updates the existing one. Sends ``pre_save`` and ``post_save``
+        (``ferro.signals``) when receivers are connected."""
+        from ferro import signals
+
+        cls = type(self)
+        meta = cls._meta
+        existing = self._persisted and self.pk is not None
+        if signals.pre_save._receivers:
+            await signals.pre_save.send(cls, instance=self, adding=not existing)
+        created = not (existing and await _ferro.update_instance(meta, self))
+        if created:
+            await _ferro.insert(meta, self)
+        if signals.post_save._receivers:
+            await signals.post_save.send(cls, instance=self, created=created)
 
     async def delete(self) -> None:
-        """Deletes the row (related rows follow their ``on_delete`` rule). An automatic primary
-        key is reset to None."""
-        meta = type(self)._meta
+        """Deletes the row (related rows follow their ``on_delete`` rule in the database, without
+        signals). An automatic primary key is reset to None. Sends ``pre_delete`` and
+        ``post_delete``."""
+        from ferro import signals
+
+        cls = type(self)
+        meta = cls._meta
+        if signals.pre_delete._receivers:
+            await signals.pre_delete.send(cls, instance=self)
         await _ferro.delete_instance(meta, self)
         self.__dict__["_persisted"] = False
+        if signals.post_delete._receivers:
+            await signals.post_delete.send(cls, instance=self)
         if meta.auto_pk:
             self.pk = None
 

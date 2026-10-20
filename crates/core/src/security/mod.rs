@@ -4,6 +4,7 @@
 
 pub mod cookies;
 pub mod cors;
+pub mod hosts;
 pub mod origin;
 pub mod proxy;
 pub mod ratelimit;
@@ -14,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::headers::security_headers;
 use crate::settings::{Settings, SettingsError};
 use cors::{CorsConfig, Preflight};
+use hosts::AllowedHosts;
 use origin::OriginCheck;
 use proxy::TrustedProxies;
 use ratelimit::{Limiter, RateSpec};
@@ -50,6 +52,8 @@ pub struct Policy {
     limiter: Limiter,
     headers: Vec<(String, String)>,
     routes: Vec<RouteOptions>,
+    hosts: AllowedHosts,
+    https_redirect: bool,
 }
 
 impl Policy {
@@ -84,11 +88,26 @@ impl Policy {
             .map(|(n, v)| ((*n).to_string(), (*v).to_string()))
             .collect();
         if settings.hsts {
-            headers.push((
-                "strict-transport-security".into(),
-                format!("max-age={}; includeSubDomains", settings.hsts_max_age),
-            ));
+            if settings.hsts_preload
+                && (!settings.hsts_include_subdomains || settings.hsts_max_age < 31_536_000)
+            {
+                return Err(SettingsError::new(
+                    "hsts_preload",
+                    "needs hsts_include_subdomains and hsts_max_age of at least 31536000 \
+                     (one year), as the preload lists require",
+                ));
+            }
+            let mut value = format!("max-age={}", settings.hsts_max_age);
+            if settings.hsts_include_subdomains {
+                value.push_str("; includeSubDomains");
+            }
+            if settings.hsts_preload {
+                value.push_str("; preload");
+            }
+            headers.push(("strict-transport-security".into(), value));
         }
+        let hosts = AllowedHosts::parse(&settings.allowed_hosts)
+            .map_err(|e| SettingsError::new("allowed_hosts", e))?;
         if let Some(policy) = &settings.content_security_policy {
             if !crate::headers::is_valid_header_value(policy) {
                 return Err(SettingsError::new(
@@ -115,7 +134,28 @@ impl Policy {
             limiter,
             headers,
             routes,
+            hosts,
+            https_redirect: settings.https_redirect,
         })
+    }
+
+    /// Whether the `Host` header names this site (always, when `allowed_hosts` is empty).
+    pub fn host_allowed(&self, host: Option<&str>) -> bool {
+        self.hosts.allows(host)
+    }
+
+    /// The HTTPS address to redirect a plain-HTTP request to, when `https_redirect` is on.
+    pub fn https_location(
+        &self,
+        scheme: &str,
+        host: Option<&str>,
+        path_and_query: &str,
+    ) -> Option<String> {
+        if !self.https_redirect || scheme == "https" {
+            return None;
+        }
+        let name = hosts::host_name(host?)?;
+        Some(format!("https://{name}{path_and_query}"))
     }
 
     /// The client's address: the peer, or the forwarded address when the peer is a trusted

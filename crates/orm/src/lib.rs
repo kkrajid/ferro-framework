@@ -20,11 +20,14 @@ mod registry;
 
 pub use error::OrmError;
 pub use field::{FieldKind, FieldMeta, FieldSpec, ForeignKeyRef, OnDelete, Relation, RelationSpec};
-pub use lookup::{Lookup, parse_key};
+pub use lookup::{DatePart, JsonKey, Lookup, Transform, check_lookup, parse_key};
 pub use meta::{CompositeIndex, ModelMeta, RESERVED_NAMES, Resolver, is_identifier, snake_case};
-pub use path::{FieldPath, Hop, resolve_field, resolve_lookup, resolve_related};
+pub use path::{
+    FieldPath, Hop, ResolvedLookup, resolve_field, resolve_lookup, resolve_lookup_key,
+    resolve_related,
+};
 pub use query::{
-    AggFunc, Aggregate, Annotation, ArithOp, Condition, Expr, Lock, Node, Operand, Order,
-    OrderTarget, Query, Selected, Shape, Target, Values,
+    AggFunc, Aggregate, Annotation, AnnotationValue, ArithOp, Condition, Expr, Func, Lock, Node,
+    Operand, Order, OrderTarget, Query, Selected, Shape, Target, Values,
 };
 pub use registry::{ManyToMany, Registry, Reverse};

@@ -57,20 +57,25 @@ class ServerRunner:
 
         set_secure_cookie_default(not settings.debug)
         _check_reserved_paths(app, settings)
-        routes = [
-            (
-                list(route.methods),
-                route.path,
-                route.endpoint
-                if route.websocket or not app._middleware
-                else compose(app._middleware, route.endpoint),
-                route.name,
-                route.rate_limit,
-                route.csrf,
-                route.websocket,
+        signalled = _request_signals_connected()
+        routes = []
+        for route in app.route_records:
+            endpoint = route.endpoint
+            if not route.websocket and app._middleware:
+                endpoint = compose(app._middleware, endpoint)
+            if not route.websocket and signalled:
+                endpoint = _with_request_signals(app, endpoint)
+            routes.append(
+                (
+                    list(route.methods),
+                    route.path,
+                    endpoint,
+                    route.name,
+                    route.rate_limit,
+                    route.csrf,
+                    route.websocket,
+                )
             )
-            for route in app.route_records
-        ]
         try:
             native = settings.to_native()
             if shared_dir is not None:
@@ -105,11 +110,35 @@ class ServerRunner:
                 self._owns_database = True
             self.app._bind_executor(self._executor)
             self._loop_thread.start()
+            self._run_hooks(self.app._startup, startup=True)
+            self._started_hooks = True
             self.address = self._native.start(self._listener)
         except BaseException:
             self.close()
             raise
         return self.address
+
+    def _run_hooks(self, hooks: list, *, startup: bool) -> None:
+        """Runs ``on_startup``/``on_shutdown`` functions on the server's loop, in order."""
+        if not hooks:
+            return
+        import inspect
+
+        async def run() -> None:
+            for hook in hooks:
+                try:
+                    result = hook()
+                    if inspect.isawaitable(result):
+                        await result
+                except Exception:
+                    if startup:
+                        raise
+                    logging.getLogger("ferro.server").exception(
+                        "on_shutdown function %r failed", hook
+                    )
+
+        timeout = None if startup else self.settings.shutdown_timeout or None
+        asyncio.run_coroutine_threadsafe(run(), self._loop).result(timeout)
 
     def wait(self, timeout: float | None = None) -> bool:
         return self._native.wait(timeout)
@@ -140,6 +169,8 @@ class ServerRunner:
         if self._closed:
             return
         self._closed = True
+        if getattr(self, "_started_hooks", False) and self._loop_thread.is_alive():
+            self._run_hooks(list(reversed(self.app._shutdown)), startup=False)
         if self._loop_thread.is_alive():
             self._loop.call_soon_threadsafe(self._loop.stop)
             self._loop_thread.join(timeout=5)
@@ -153,6 +184,41 @@ class ServerRunner:
         if self._owns_database:
             db.disconnect_now()
             self._owns_database = False
+
+
+def _request_signals_connected() -> bool:
+    from ferro import signals
+
+    return any(
+        s._receivers
+        for s in (signals.request_started, signals.request_finished, signals.got_request_exception)
+    )
+
+
+def _with_request_signals(app: App, endpoint):
+    """Sends ``request_started``/``request_finished``/``got_request_exception`` around a routed
+    request (only when receivers were connected before the server started)."""
+    import inspect
+
+    from ferro import signals
+    from ferro.exceptions import HTTPException
+
+    async def signalled(request):
+        await signals.request_started.send(app, request=request)
+        try:
+            result = endpoint(request)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        except HTTPException:
+            raise
+        except Exception as exc:
+            await signals.got_request_exception.send_robust(app, request=request, exception=exc)
+            raise
+        finally:
+            await signals.request_finished.send_robust(app, request=request)
+
+    return signalled
 
 
 def _drain(runner: ServerRunner, seconds: float) -> bool:
@@ -201,6 +267,17 @@ def _warn_debug_build() -> None:
         )
 
 
+def _warn_open_hosts(settings: Settings) -> None:
+    """Outside development, a server reachable from other machines should list its names
+    (Feature 023): otherwise any ``Host`` header is accepted."""
+    loopback = settings.host in ("127.0.0.1", "::1", "localhost")
+    if not settings.debug and not loopback and not settings.allowed_hosts:
+        logging.getLogger("ferro.server").warning(
+            "allowed_hosts is not set: requests with any Host header are served. Set "
+            "FERRO_ALLOWED_HOSTS=example.com (or App(allowed_hosts=[...])) in production."
+        )
+
+
 def _raise_shutdown(signum: int, frame: object) -> None:
     raise _Shutdown(signum)
 
@@ -244,6 +321,7 @@ def serve(
                 url = f"{settings.scheme}://{shown_host}:{port}"
                 print(banner.format(url=url), file=sys.stderr, flush=True)
             _warn_debug_build()
+            _warn_open_hosts(settings)
             while not runner.wait(_WAIT_SLICE):
                 pass
             return 0

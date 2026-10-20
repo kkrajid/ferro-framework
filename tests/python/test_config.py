@@ -115,6 +115,11 @@ def test_native_settings_shape():
         "hsts",
         "hsts_max_age",
         "content_security_policy",
+        # Feature 023
+        "hsts_include_subdomains",
+        "hsts_preload",
+        "allowed_hosts",
+        "https_redirect",
         # Feature 011
         "health_path",
         "ready_path",

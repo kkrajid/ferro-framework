@@ -23,6 +23,7 @@ from ferro.admin.html import HEADERS, Markup, join, page, tag
 from ferro.admin.options import ModelAdmin
 from ferro.auth import authenticate, login, logout
 from ferro.auth.hashers import PasswordError
+from ferro.auth.sessions import LoginThrottled
 from ferro.db import transaction
 from ferro.exceptions import ConfigurationError
 from ferro.models import Count, FieldError, IntegrityError, ProtectedError, Q
@@ -181,14 +182,20 @@ class AdminSite:
         if request.method == "POST":
             form = await request.form()
             next_url = self._safe_next(form.get("next"))
-            user = await authenticate(form.get("username", ""), form.get("password", ""))
+            try:
+                user = await authenticate(
+                    form.get("username", ""), form.get("password", ""), request
+                )
+            except LoginThrottled as throttled:
+                user, error = None, throttled.message
+            else:
+                error = (
+                    "Please enter the correct username and password for a staff account. Both "
+                    "fields may be case-sensitive."
+                )
             if user is not None and user.is_active and user.is_staff:
                 await login(request, user)
                 return _redirect(next_url)
-            error = (
-                "Please enter the correct username and password for a staff account. Both "
-                "fields may be case-sensitive."
-            )
             username = form.get("username", "")
         else:
             next_url = self._safe_next(request.query.get("next"))

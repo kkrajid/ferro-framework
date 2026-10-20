@@ -108,6 +108,10 @@ class App:
         cors: CORS | None = None,
         hsts: bool | None = None,
         hsts_max_age: int | None = None,
+        hsts_include_subdomains: bool | None = None,
+        hsts_preload: bool | None = None,
+        allowed_hosts: Iterable[str] | None = None,
+        https_redirect: bool | None = None,
         content_security_policy: str | None = None,
         processes: int | None = None,
         health_path: str | None = None,
@@ -142,6 +146,10 @@ class App:
             "cors": cors,
             "hsts": hsts,
             "hsts_max_age": hsts_max_age,
+            "hsts_include_subdomains": hsts_include_subdomains,
+            "hsts_preload": hsts_preload,
+            "allowed_hosts": None if allowed_hosts is None else list(allowed_hosts),
+            "https_redirect": https_redirect,
             "content_security_policy": content_security_policy,
             "processes": processes,
             "health_path": health_path,
@@ -162,6 +170,8 @@ class App:
             import ferro.cache.models  # noqa: F401
         self._routes: list[RouteRecord] = []
         self._middleware: list[Middleware] = []
+        self._startup: list[Callable[[], Any]] = []
+        self._shutdown: list[Callable[[], Any]] = []
         self._executor: Executor | None = None
 
     # -- registration -----------------------------------------------------------------------
@@ -177,13 +187,37 @@ class App:
         self._middleware.append(func)
         return func
 
-    def add_auth(self) -> None:
+    def add_auth(
+        self, *, max_login_attempts: int | None = None, login_lockout: float | None = None
+    ) -> None:
         """Installs the authentication middleware (outermost), so every routed request has
-        ``request.user`` and ``request.session``. Needs the auth tables (``ferro migrate``)."""
-        from ferro.auth.sessions import auth_middleware
+        ``request.user`` and ``request.session``. Needs the auth tables (``ferro migrate``).
 
-        if auth_middleware not in self._middleware:
-            self._middleware.insert(0, auth_middleware)
+        ``authenticate()`` refuses a username (from one client address) after
+        ``max_login_attempts`` failures (default 5) for ``login_lockout`` seconds (default 900).
+        """
+        from ferro.auth import sessions
+
+        sessions.configure_login_throttle(max_login_attempts, login_lockout)
+        if sessions.auth_middleware not in self._middleware:
+            self._middleware.insert(0, sessions.auth_middleware)
+
+    def on_startup(self, func: Callable[[], Any]) -> Callable[[], Any]:
+        """Registers ``func`` (sync or ``async``, no arguments) to run on the server's event
+        loop before it accepts requests — open clients, warm caches. An exception stops the
+        server from starting. Runs in each process of ``--processes``, and in ``TestClient``."""
+        if not callable(func):
+            raise TypeError("on_startup() takes a function")
+        self._startup.append(func)
+        return func
+
+    def on_shutdown(self, func: Callable[[], Any]) -> Callable[[], Any]:
+        """Registers ``func`` to run after the server stopped serving (reverse order of
+        registration); exceptions are logged and the others still run."""
+        if not callable(func):
+            raise TypeError("on_shutdown() takes a function")
+        self._shutdown.append(func)
+        return func
 
     def add_admin(self, site: Any = None, prefix: str = "/admin") -> None:
         """Mounts the admin (``ferro.admin.admin`` by default) under ``prefix`` and installs the

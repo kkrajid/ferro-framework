@@ -17,6 +17,7 @@ mod orm;
 mod orm_query;
 mod orm_values;
 mod passwords;
+mod raw_sql;
 mod realtime;
 mod request;
 mod server;
@@ -62,6 +63,8 @@ fn _ferro(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(orm::delete_instance, m)?)?;
     m.add_function(wrap_pyfunction!(orm::bulk_insert, m)?)?;
     m.add_function(wrap_pyfunction!(orm::reset_sequences, m)?)?;
+    m.add_function(wrap_pyfunction!(raw_sql::raw_execute, m)?)?;
+    m.add_function(wrap_pyfunction!(raw_sql::raw_fetch, m)?)?;
     m.add_function(wrap_pyfunction!(orm::bulk_update, m)?)?;
     m.add_function(wrap_pyfunction!(orm::list_tables, m)?)?;
     m.add_function(wrap_pyfunction!(orm::create_tables, m)?)?;

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::error::OrmError;
-use crate::field::FieldMeta;
-use crate::lookup::Lookup;
+use crate::field::{FieldKind, FieldMeta};
+use crate::lookup::{DatePart, JsonKey, Lookup, Transform, check_lookup};
 use crate::meta::ModelMeta;
 use crate::registry::{Registry, Reverse};
 
@@ -219,50 +219,122 @@ fn is_lookup(registry: &Registry, model: &Arc<ModelMeta>, rest: &[&str]) -> bool
     rest.len() == 1 && Lookup::parse(rest[0]).is_some() && step(registry, model, rest[0]).is_none()
 }
 
+/// A resolved lookup key: the field, an optional transform of its value, and the lookup.
+#[derive(Debug, Clone)]
+pub struct ResolvedLookup {
+    pub path: FieldPath,
+    pub transform: Option<Transform>,
+    pub lookup: Lookup,
+}
+
+impl ResolvedLookup {
+    /// The kind of the compared value (after the transform).
+    pub fn compared_kind(&self) -> FieldKind {
+        match &self.transform {
+            None => self.path.meta().kind.clone(),
+            Some(Transform::Date(part)) => part.output_kind(),
+            Some(Transform::Json(_)) => FieldKind::Json,
+        }
+    }
+}
+
 fn finish(
     hops: Vec<Hop>,
     model: Arc<ModelMeta>,
     field: usize,
     rest: &[&str],
     key: &str,
-) -> Result<(FieldPath, Lookup), OrmError> {
-    let lookup = match rest {
-        [] => Lookup::Exact,
-        [name] => Lookup::parse(name).ok_or_else(|| {
-            let names: Vec<&str> = Lookup::ALL.iter().map(|l| l.name()).collect();
-            OrmError(format!(
-                "{}: unknown lookup '{name}' in '{key}'; lookups: {}",
-                model.label,
-                names.join(", ")
-            ))
-        })?,
-        [next, ..] => {
-            return Err(OrmError(format!(
-                "{}: '{}' is not a relation; cannot follow '{next}' in '{key}'",
-                model.label, model.fields[field].name
-            )));
+) -> Result<ResolvedLookup, OrmError> {
+    let meta = &model.fields[field];
+    let unknown_lookup = |name: &str| {
+        let names: Vec<&str> = Lookup::ALL.iter().map(|l| l.name()).collect();
+        OrmError(format!(
+            "{}: unknown lookup '{name}' in '{key}'; lookups: {}",
+            model.label,
+            names.join(", ")
+        ))
+    };
+    let (transform, lookup) = if meta.kind == FieldKind::Json {
+        // Every part before a final lookup name is a key of the document.
+        let (keys, lookup) = match rest.split_last() {
+            None => (&[][..], Lookup::Exact),
+            Some((last, keys)) => match Lookup::parse(last) {
+                Some(lookup) => (keys, lookup),
+                None => (rest, Lookup::Exact),
+            },
+        };
+        let transform = (!keys.is_empty())
+            .then(|| Transform::Json(keys.iter().map(|k| JsonKey::parse(k)).collect()));
+        if transform.is_some() {
+            // A value inside the document: any lookup except JSON-only ones on scalars.
+            return Ok(ResolvedLookup {
+                path: FieldPath { hops, model, field },
+                transform,
+                lookup,
+            });
+        }
+        (None, lookup)
+    } else {
+        match rest {
+            [] => (None, Lookup::Exact),
+            [name] => match DatePart::parse(name) {
+                Some(part) if part.applies_to(&meta.kind) => {
+                    (Some(Transform::Date(part)), Lookup::Exact)
+                }
+                _ => (
+                    None,
+                    Lookup::parse(name).ok_or_else(|| unknown_lookup(name))?,
+                ),
+            },
+            [part, name] if DatePart::parse(part).is_some_and(|p| p.applies_to(&meta.kind)) => {
+                let part = DatePart::parse(part).expect("checked above");
+                (
+                    Some(Transform::Date(part)),
+                    Lookup::parse(name).ok_or_else(|| unknown_lookup(name))?,
+                )
+            }
+            [next, ..] => {
+                return Err(OrmError(format!(
+                    "{}: '{}' is not a relation; cannot follow '{next}' in '{key}'",
+                    model.label, meta.name
+                )));
+            }
         }
     };
-    let meta = &model.fields[field];
-    let kind = &meta.kind;
-    if (lookup.is_text() && !kind.is_text()) || (lookup.is_comparison() && !kind.is_ordered()) {
-        return Err(OrmError(format!(
-            "{}: lookup '{}' cannot be used on {} field '{}'",
-            model.label,
-            lookup.name(),
-            kind.name(),
-            meta.name
-        )));
-    }
-    Ok((FieldPath { hops, model, field }, lookup))
+    let kind = match transform {
+        Some(Transform::Date(part)) => part.output_kind(),
+        _ => meta.kind.clone(),
+    };
+    check_lookup(&model.label, &meta.name, &kind, lookup)?;
+    Ok(ResolvedLookup {
+        path: FieldPath { hops, model, field },
+        transform,
+        lookup,
+    })
 }
 
-/// Resolves a lookup key (`category__name__icontains`) from `root`.
+/// Resolves a lookup key (`category__name__icontains`) from `root`; transforms are refused.
 pub fn resolve_lookup(
     registry: &Registry,
     root: &Arc<ModelMeta>,
     key: &str,
 ) -> Result<(FieldPath, Lookup), OrmError> {
+    let resolved = resolve_lookup_key(registry, root, key)?;
+    if resolved.transform.is_some() {
+        return Err(OrmError(format!(
+            "{}: '{key}' uses a transform here",
+            root.label
+        )));
+    }
+    Ok((resolved.path, resolved.lookup))
+}
+
+/// Resolves a lookup key with transforms: `created__year__gte`, `data__owner__name__iexact`.
+pub fn resolve_lookup_key(
+    registry: &Registry,
+    root: &Arc<ModelMeta>,
+    key: &str,
+) -> Result<ResolvedLookup, OrmError> {
     let parts: Vec<&str> = key.split("__").collect();
     let mut model = root.clone();
     let mut hops = Vec::new();

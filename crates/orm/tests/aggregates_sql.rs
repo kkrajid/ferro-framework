@@ -91,7 +91,7 @@ fn per_record_annotations_are_correlated_subqueries() {
         .annotate(vec![("n".into(), count)])
         .unwrap();
     let n = q.annotation("n").unwrap();
-    let field = q.annotations[n].aggregate.output_field("n");
+    let field = q.annotations[n].output_field();
     let q = q
         .with_node(Some(Node::Leaf(
             Condition::on(
@@ -163,7 +163,7 @@ fn values_and_grouped_annotations() {
         .annotate(vec![("total".into(), total)])
         .unwrap();
     let index = grouped.annotation("total").unwrap();
-    let field = grouped.annotations[index].aggregate.output_field("total");
+    let field = grouped.annotations[index].output_field();
     let grouped = grouped
         .with_node(Some(Node::Leaf(
             Condition::on(
