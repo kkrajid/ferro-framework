@@ -119,12 +119,19 @@ def temporary_cluster() -> Iterator[PostgresServer | None]:
         "-E",
         "UTF8",
     ]
-    created = subprocess.run(
-        [*initdb, "--locale-provider=builtin", "--builtin-locale=C.UTF-8"], capture_output=True
-    )
-    if created.returncode != 0:
+    # Unicode-aware case mapping (`iexact` on "ÉCOLE"): the builtin provider (PostgreSQL 17+),
+    # else ICU, else glibc's C.UTF-8; a plain C locale only folds ASCII.
+    for locale in (
+        ["--locale-provider=builtin", "--builtin-locale=C.UTF-8"],
+        ["--locale-provider=icu", "--icu-locale=und", "--locale=C.UTF-8"],
+        ["--locale=C.UTF-8"],
+        ["--no-locale"],
+    ):
+        if subprocess.run([*initdb, *locale], capture_output=True).returncode == 0:
+            break
         shutil.rmtree(data, ignore_errors=True)
-        subprocess.run([*initdb, "--no-locale"], check=True, capture_output=True)
+    else:
+        raise RuntimeError("initdb failed with every locale setting")
     port = free_port()
     server = PostgresServer(
         f"postgresql://ferro@127.0.0.1:{port}/postgres",

@@ -163,7 +163,9 @@ await cheap.exclude(stock=0).count()
 | `in` | `field__in=[1, 2, 3]` |
 | `isnull` | `field__isnull=True` |
 
-On SQLite `iexact`/`icontains` fold ASCII letters only; PostgreSQL folds all Unicode letters.
+On SQLite `iexact`/`icontains` fold ASCII letters only; PostgreSQL folds all Unicode letters
+when the database has a Unicode locale (the default of managed services and of `initdb` on a
+UTF-8 system; a database created with the `C` locale folds ASCII only).
 
 ### Q and F
 
