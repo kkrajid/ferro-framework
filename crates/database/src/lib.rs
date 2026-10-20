@@ -279,4 +279,39 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Stops accepting jobs and releases connections after queued jobs finish.
     fn close(&self);
+
+    /// Delivers the payload of every notification sent on `channel` (PostgreSQL
+    /// `LISTEN`/`NOTIFY`, Feature 018) until the returned listener is dropped.
+    fn listen(
+        &self,
+        _channel: &str,
+        _deliver: Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Result<Listener, DbError> {
+        Err(DbError::Other {
+            message: "notifications (LISTEN/NOTIFY) need a PostgreSQL database".into(),
+        })
+    }
+}
+
+/// A running notification listener; dropping it stops listening.
+pub struct Listener(Option<Box<dyn FnOnce() + Send + Sync>>);
+
+impl Listener {
+    pub fn new(stop: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self(Some(Box::new(stop)))
+    }
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        if let Some(stop) = self.0.take() {
+            stop();
+        }
+    }
+}
+
+impl fmt::Debug for Listener {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Listener")
+    }
 }

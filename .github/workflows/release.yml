@@ -94,7 +94,7 @@ jobs:
           python -m venv /tmp/venv
           if [ -x /tmp/venv/Scripts/python ]; then PY=/tmp/venv/Scripts/python; else PY=/tmp/venv/bin/python; fi
           "$PY" -m pip install --upgrade pip
-          "$PY" -m pip install --no-index --find-links dist ferro
+          "$PY" -m pip install --no-index --find-links dist ferro-framework
           "$PY" scripts/smoke_test.py
 
   publish:

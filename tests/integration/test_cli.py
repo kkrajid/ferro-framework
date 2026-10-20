@@ -60,6 +60,19 @@ def test_dotted_target(tmp_path):
     assert "myproject.main.index" in result.stdout
 
 
+def test_routes_show_websockets(tmp_path):
+    (tmp_path / "app.py").write_text(
+        "from ferro import App\napp = App()\n\n"
+        "@app.websocket('/chat')\nasync def chat(ws):\n    pass\n\n"
+        "@app.get('/')\nasync def home():\n    return {}\n"
+    )
+    result = run_cli("routes", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.strip().splitlines()[1:]
+    rows = [re.split(r"\s{2,}", line.strip()) for line in lines]
+    assert rows == [["GET, HEAD", "/", "app.home"], ["WEBSOCKET", "/chat", "app.chat"]]
+
+
 @pytest.mark.parametrize(
     ("target", "message"),
     [

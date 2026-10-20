@@ -16,8 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 PUBLIC = {
     "ferro": [
-        "App", "CORS", "ConfigurationError", "HTTPException", "JSONResponse", "Request",
-        "Response", "ValidationError", "__version__",
+        "App", "CORS", "ConfigurationError", "EventStream", "HTTPException", "JSONResponse",
+        "Request", "Response", "ServerSentEvent", "StreamingResponse", "ValidationError",
+        "WebSocket", "WebSocketDisconnect", "__version__",
     ],
     "ferro.models": [
         "Avg", "BigInteger", "Boolean", "CASCADE", "Count", "DO_NOTHING", "DatabaseError",
@@ -41,7 +42,14 @@ PUBLIC = {
         "BaseCache", "DEFAULT_TIMEOUT", "DatabaseCache", "MemoryCache", "cache", "configure",
     ],
     "ferro.migrations": ["Migration", "MigrationError", "ops"],
-    "ferro.testing": ["TestClient", "TestResponse"],
+    "ferro.testing": [
+        "TestClient", "TestResponse", "TestStreamResponse", "TestWebSocket",
+        "WebSocketDisconnect", "WebSocketRejected", "connect_websocket",
+    ],
+    "ferro.websockets": ["WebSocket", "WebSocketDisconnect"],
+    "ferro.broadcast": [
+        "MAX_MESSAGE_BYTES", "Broadcast", "Subscription", "broadcast", "configure",
+    ],
 }  # fmt: skip
 
 

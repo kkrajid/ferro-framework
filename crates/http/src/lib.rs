@@ -11,6 +11,7 @@ mod metrics;
 mod server;
 mod service;
 mod snapshots;
+mod socket;
 mod tls;
 
 pub use lifecycle::ShutdownStats;

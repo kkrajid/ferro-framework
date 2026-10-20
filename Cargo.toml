@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -33,6 +33,7 @@ ferro-shared = { path = "crates/shared" }
 
 actix-web = { version = "4.15", default-features = false }
 actix-rt = "2"
+actix-ws = "0.3"
 argon2 = { version = "0.5", features = ["std"] }
 async-channel = "2"
 bytes = "1"

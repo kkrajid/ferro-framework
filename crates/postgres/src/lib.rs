@@ -9,6 +9,7 @@
 
 mod config;
 mod errors;
+mod listener;
 pub mod numeric;
 pub mod pgtime;
 mod tls;
@@ -37,6 +38,7 @@ pub struct PgBackend {
     runtime: Mutex<Option<Runtime>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     sessions: SessionRegistry,
+    shared: Arc<worker::Shared>,
 }
 
 impl std::fmt::Debug for PgBackend {
@@ -72,11 +74,27 @@ impl PgBackend {
             runtime: Mutex::new(Some(runtime)),
             workers: Mutex::new(workers),
             sessions: SessionRegistry::default(),
+            shared,
         })
     }
 }
 
 impl Backend for PgBackend {
+    fn listen(
+        &self,
+        channel: &str,
+        deliver: Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Result<ferro_database::Listener, DbError> {
+        let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = runtime.as_ref().ok_or(DbError::Closed)?;
+        let task = runtime.spawn(listener::run(
+            self.shared.clone(),
+            channel.to_string(),
+            deliver,
+        ));
+        Ok(ferro_database::Listener::new(move || task.abort()))
+    }
+
     fn submit(&self, job: Job, cancelled: Arc<AtomicBool>, done: Completion) {
         let sender = self
             .sender

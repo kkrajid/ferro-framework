@@ -93,6 +93,10 @@ error. All problems of a request are reported together:
 
 Repeated query parameters: `request.query.getlist("tag")`.
 
+**Request bodies as models**: with Pydantic installed, a parameter annotated with a Pydantic
+model receives the validated JSON or form body, and a return annotation such as
+`-> ProductOut` sends only the declared fields — see [Pydantic](17-pydantic.md).
+
 ## The request
 
 | Attribute | |
@@ -129,6 +133,7 @@ with a pre-signed URL (the usual choice for large files).
 | `None` | `204 No Content` |
 | `Response(content, status=200, headers=None, media_type=None)` | exactly that |
 | `JSONResponse(content, status=200, headers=None)` | JSON even for a `str` |
+| `StreamingResponse(chunks, ...)`, `EventStream(events)` | sent piece by piece — see [Real-time](16-realtime.md) |
 
 ```python
 from ferro import JSONResponse, Response
@@ -227,5 +232,5 @@ async def require_api_key(request, call_next):
 There is no built-in task queue. Work that must survive the request (emails, reports) belongs in
 a job queue or a separate worker process; short fire-and-forget work can use a database table
 polled by a worker using `select_for_update(skip_locked=True)` (see
-[Models](04-models-and-queries.md#locking-rows)). WebSockets and server-sent events are not
-supported.
+[Models](04-models-and-queries.md#locking-rows)). To push data to clients as it happens
+(WebSockets, server-sent events, streamed downloads), see [Real-time](16-realtime.md).

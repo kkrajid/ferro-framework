@@ -7,5 +7,7 @@
 		# FERRO_TRUSTED_PROXIES only.
 		health_uri /readyz
 		health_interval 5s
+		# Pass streamed responses and server-sent events on at once (WebSockets need nothing).
+		flush_interval -1
 	}
 }

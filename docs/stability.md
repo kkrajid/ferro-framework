@@ -25,18 +25,23 @@ may change behaviour in a patch release, documented in the changelog under "Secu
 
 | Module | Public names |
 |---|---|
-| `ferro` | `App`, `Request`, `Response`, `JSONResponse`, `HTTPException`, `ValidationError`, `ConfigurationError`, `CORS`, `__version__` |
+| `ferro` | `App`, `Request`, `Response`, `JSONResponse`, `StreamingResponse`, `EventStream`, `ServerSentEvent`, `WebSocket`, `WebSocketDisconnect`, `HTTPException`, `ValidationError`, `ConfigurationError`, `CORS`, `__version__` |
 | `ferro.models` | `Model`, `Field` and the field classes (`String`, `Text`, `Integer`, `BigInteger`, `Float`, `Decimal`, `Boolean`, `Date`, `DateTime`, `Time`, `UUID`, `JSON`), relations (`ForeignKey`, `OneToOne`, `ManyToMany`, `CASCADE`, `SET_NULL`, `PROTECT`, `DO_NOTHING`), `QuerySet`, `Q`, `F`, aggregates (`Count`, `Sum`, `Avg`, `Min`, `Max`), `prefetch_related_objects`, exceptions (`FieldError`, `DatabaseError`, `IntegrityError`, `ProtectedError`, `OperationalError`, `DatabaseUnavailableError`, `TransactionError`, `ObjectDoesNotExist`, `MultipleObjectsReturned`, `RelatedNotLoaded`) |
 | `ferro.db` | `connect`, `disconnect`, `is_connected`, `create_tables`, `transaction`, `DatabaseUnavailableError`, `TransactionError` |
 | `ferro.auth` | `User`, `Group`, `Permission`, `Session`, `AnonymousUser`, `authenticate`, `login`, `logout`, `login_required`, `staff_required`, `permission_required`, `auth_middleware`, `make_password`, `validate_password`, `PasswordError`, `create_permissions` |
 | `ferro.admin` | `admin`, `AdminSite`, `ModelAdmin` |
 | `ferro.cache` | `cache`, `configure`, `BaseCache`, `MemoryCache`, `DatabaseCache`, `DEFAULT_TIMEOUT` |
 | `ferro.migrations` | `Migration`, `MigrationError`, `ops` (operations used in migration files) |
-| `ferro.testing` | `TestClient`, `TestResponse` |
+| `ferro.websockets` | `WebSocket`, `WebSocketDisconnect` |
+| `ferro.broadcast` | `broadcast`, `configure`, `Broadcast`, `Subscription`, `MAX_MESSAGE_BYTES` |
+| `ferro.testing` | `TestClient`, `TestResponse`, `TestStreamResponse`, `TestWebSocket`, `WebSocketRejected`, `WebSocketDisconnect`, `connect_websocket` |
 
 Public behaviour includes the documented methods and attributes of these classes (for example
 every `QuerySet` method in the [guide](getting-started.md), `Request` attributes, `Model`
 methods), and the documented semantics (lookups, `on_delete`, transactions, error envelopes).
+With Pydantic installed, the [Pydantic integration](guide/17-pydantic.md) is public behaviour
+too: model-annotated body parameters, return-annotation response models, models accepted
+wherever JSON is written, and the `ferro-framework[pydantic]` extra.
 
 **Command line**: `ferro new`, `dev`, `run`, `routes`, `shell`, `db create-tables`, `db shell`,
 `makemigrations`, `migrate`, `rollback`, `migration status`, `createsuperuser`, their documented

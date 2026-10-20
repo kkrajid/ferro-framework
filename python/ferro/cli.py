@@ -298,13 +298,17 @@ def _worker(args: argparse.Namespace) -> int:
 def _routes(args: argparse.Namespace) -> int:
     app = load_app(args.target)
     rows = []
-    for route in app.routes:
+    for route in app.route_records:
+        if route.websocket:
+            rows.append(("WEBSOCKET", route.path, route.name))
+            continue
         methods = set(route.methods)
         if "GET" in methods:
             methods.add("HEAD")
         ordered = ", ".join(m for m in _CANONICAL_METHODS if m in methods)
         rows.append((ordered, route.path, route.name))
-    rows.sort(key=lambda row: (row[1], _CANONICAL_METHODS.index(row[0].split(", ")[0])))
+    order = (*_CANONICAL_METHODS, "WEBSOCKET")
+    rows.sort(key=lambda row: (row[1], order.index(row[0].split(", ")[0])))
     header = ("METHODS", "PATH", "HANDLER")
     widths = [max(len(r[i]) for r in [header, *rows]) for i in range(2)]
     for row in [header, *rows]:

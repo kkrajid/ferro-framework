@@ -4,6 +4,44 @@ All notable changes to Ferro. The format follows [Keep a Changelog](https://keep
 and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 rules in
 [docs/stability.md](docs/stability.md).
 
+## [0.5.0rc2] — 2026-10-20
+
+Second release candidate; the first one published to PyPI (0.5.0rc1 was never uploaded, so
+this candidate also adds the features below).
+
+### Changed
+
+- The distribution is now called **`ferro-framework`** on PyPI (`pip install
+  ferro-framework`); the name `ferro` belongs to an unrelated project. The import name
+  (`import ferro`) and the `ferro` command are unchanged. Projects created by `ferro new`
+  depend on `ferro-framework`; existing projects should change `"ferro"` to
+  `"ferro-framework"` in their dependencies.
+
+### Added
+
+- **Real-time** (Feature 018, [guide](docs/guide/16-realtime.md)): WebSocket endpoints
+  (`@app.websocket`, `ferro.WebSocket`, `WebSocketDisconnect`) with the handshake checked for
+  origin and rate limits, `ws.user`/`ws.session` with `app.add_auth()`, pings, back-pressure
+  and close code 1001 on shutdown; `StreamingResponse` and server-sent events
+  (`EventStream`, `ServerSentEvent`) sent chunk by chunk, over HTTP/1.1 and HTTP/2 (a body
+  that cannot finish is aborted, never ended as if complete);
+  `ferro.broadcast` publish/subscribe in one process (`memory`) or across processes and
+  machines with PostgreSQL `LISTEN`/`NOTIFY` (`broadcast="database"`, `FERRO_BROADCAST`);
+  `TestClient.websocket_connect()` and `TestClient.stream()`; metrics
+  `ferro_websocket_connections` and `ferro_http_streams_open`.
+- `deploy/nginx.conf` passes WebSocket upgrades; `deploy/Caddyfile` flushes streamed
+  responses at once.
+- **Pydantic integration** (Feature 019, [guide](docs/guide/17-pydantic.md)): a handler
+  parameter annotated with a Pydantic model receives the validated JSON or form body (422
+  with every problem, 400 for malformed JSON, 415 for other content types); a return
+  annotation using Pydantic models converts results — Ferro model instances included — and
+  sends only the declared fields; Pydantic models are accepted wherever Ferro writes JSON.
+  Optional extra `ferro-framework[pydantic]`.
+- Related managers (`category.products`, many-to-many) can be iterated after
+  `prefetch_related`/`fetch_related` (iterating never queries; `RelatedNotLoaded` otherwise).
+- `TestClient` requests take `content=` for raw bodies; `ferro routes` lists WebSocket routes
+  as `WEBSOCKET`.
+
 ## [0.5.0rc1] — 2026-10-11
 
 First release candidate; the first version published as wheels.

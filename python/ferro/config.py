@@ -155,6 +155,16 @@ def _cache(value: Any) -> str:
     return text
 
 
+_BROADCASTS = ("memory", "database")
+
+
+def _broadcast(value: Any) -> str:
+    text = str(value).strip().lower()
+    if text not in _BROADCASTS:
+        raise _Invalid(f"must be one of {', '.join(_BROADCASTS)}")
+    return text
+
+
 def _same_path(a: str, b: str) -> bool:
     return bool(a and b) and (a.rstrip("/") or "/") == (b.rstrip("/") or "/")
 
@@ -207,6 +217,7 @@ _SPECS: dict[str, _Spec] = {
     "tls_cert": _Spec(_optional_text, lambda mode: None),
     "tls_key": _Spec(_optional_text, lambda mode: None),
     "cache": _Spec(_cache, lambda mode: "memory", native=False),
+    "broadcast": _Spec(_broadcast, lambda mode: "memory", native=False),
 }
 
 SETTING_NAMES: tuple[str, ...] = tuple(_SPECS)
@@ -245,6 +256,7 @@ class Settings:
     tls_cert: str | None = None
     tls_key: str | None = None
     cache: str = "memory"
+    broadcast: str = "memory"
     sources: Mapping[str, str] = field(default_factory=dict, compare=False)
 
     @property
@@ -306,7 +318,19 @@ def resolve(
         sources[name] = source
     _check_addresses(values, sources)
     _check_tls(values, sources)
+    _check_broadcast(values, sources)
     return Settings(**values, sources=sources)
+
+
+def _check_broadcast(values: Mapping[str, Any], sources: Mapping[str, str]) -> None:
+    """Broadcast across processes uses PostgreSQL LISTEN/NOTIFY (Feature 018)."""
+    url = values["database_url"] or ""
+    if values["broadcast"] == "database" and not url.startswith(("postgresql:", "postgres:")):
+        raise ConfigurationError(
+            f"setting 'broadcast' is 'database' (from {sources['broadcast']}) but the database "
+            "is not PostgreSQL: broadcast across processes uses PostgreSQL LISTEN/NOTIFY; use "
+            "'memory' with SQLite"
+        )
 
 
 def _check_tls(values: Mapping[str, Any], sources: Mapping[str, str]) -> None:

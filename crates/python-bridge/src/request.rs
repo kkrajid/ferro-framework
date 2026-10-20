@@ -77,7 +77,7 @@ pub(crate) struct Ready {
 }
 
 impl Ready {
-    fn new(value: Py<PyAny>) -> Self {
+    pub(crate) fn new(value: Py<PyAny>) -> Self {
         Self {
             value: Mutex::new(Some(value)),
         }

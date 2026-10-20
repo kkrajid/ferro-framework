@@ -105,7 +105,10 @@ certificates for several sites, static files, port 80 redirects).
 **Is Ferro WSGI or ASGI?** Neither. The Rust engine calls your Python handlers directly, so WSGI
 and ASGI middleware or servers do not apply.
 
-**Can I use Jinja2, httpx, Pydantic and other libraries?** Yes — any Python library. Use async
+**Serializers / validation like DRF or FastAPI?** Use Pydantic models: Ferro validates request
+bodies into them and sends them as responses — see [Pydantic](17-pydantic.md).
+
+**Can I use Jinja2, httpx and other libraries?** Yes — any Python library. Use async
 libraries inside `async def` handlers; blocking ones in plain `def` handlers.
 
 **Can I use SQLAlchemy or the Django ORM?** Ferro's admin, auth, migrations and cache are built on
@@ -114,8 +117,12 @@ with those features.
 
 **Static files?** Not served by Ferro; use a CDN, object storage, or your reverse proxy.
 
-**WebSockets, server-sent events, file-upload parsing (`multipart/form-data`)?** Not yet.
-Uploads can be sent as the raw request body.
+**WebSockets and server-sent events?** Yes: `@app.websocket`, `EventStream` and
+`StreamingResponse`, with `ferro.broadcast` to reach many connections — see
+[Real-time](16-realtime.md).
+
+**File-upload parsing (`multipart/form-data`)?** Not yet. Uploads can be sent as the raw
+request body.
 
 **Which Python versions?** CPython 3.12 and newer.
 

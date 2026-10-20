@@ -27,6 +27,14 @@ impl Dispatcher for PyDispatcher {
         Box::pin(self.bridge.submit(request))
     }
 
+    fn open_socket(
+        &self,
+        request: FerroRequest,
+        link: Arc<ferro_core::SocketLink>,
+    ) -> Arc<dyn ferro_core::SocketEvents> {
+        self.bridge.open_socket(request, link)
+    }
+
     fn write_metrics(&self, out: &mut String) {
         db::write_metrics(out);
     }

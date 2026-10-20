@@ -14,10 +14,11 @@ need to know Rust to use it.
 > `select_for_update`, custom link models and abstract models (013), TLS and HTTP/2 (014),
 > rate limits and metrics shared across processes plus `ferro.cache` (015), wheels and a release
 > workflow (016), and the release-candidate work — security review, API freeze, deployment
-> guide (017). See the [roadmap](docs/roadmap.md) and the [changelog](CHANGELOG.md).
+> guide (017); since then WebSockets, server-sent events and streaming with broadcast across
+> processes (018), Pydantic models for bodies and responses (019). See the [roadmap](docs/roadmap.md) and the [changelog](CHANGELOG.md).
 
 ```bash
-pip install ferro        # once published; wheels for Linux, macOS and Windows, Python 3.12+
+pip install ferro-framework   # once published; wheels for Linux, macOS and Windows, Python 3.12+
 ```
 
 ## Start a project
@@ -83,6 +84,10 @@ curl http://127.0.0.1:8000/
 - HTTPS and HTTP/2 from `ferro run --tls-cert ... --tls-key ...`, no proxy required
 - `ferro run --processes N` with rate limits and metrics shared by every process; `ferro.cache`
   (memory or database)
+- WebSockets (`@app.websocket`), server-sent events and streaming responses, and
+  `ferro.broadcast` to reach sockets in every process and machine through PostgreSQL
+- Pydantic models as request bodies and response models (`async def create(data: ProductIn)
+  -> ProductOut`), validation errors as 422 with every problem listed
 
 ## Documentation
 
@@ -94,7 +99,9 @@ curl http://127.0.0.1:8000/
   [migrations](docs/guide/05-migrations.md),
   [authentication](docs/guide/06-authentication.md), [admin](docs/guide/07-admin.md),
   [cache](docs/guide/08-cache.md), [security](docs/guide/09-security.md),
-  [testing](docs/guide/10-testing.md), [logging and metrics](docs/guide/11-logging-monitoring.md)
+  [testing](docs/guide/10-testing.md), [logging and metrics](docs/guide/11-logging-monitoring.md),
+  [real-time: WebSockets, SSE, streaming](docs/guide/16-realtime.md),
+  [Pydantic models](docs/guide/17-pydantic.md)
 - Production: [deployment](docs/deployment.md) (Ubuntu server from zero, Docker, Kubernetes,
   PaaS), [performance and scaling](docs/guide/12-performance-scaling.md),
   [troubleshooting](docs/guide/13-troubleshooting.md)
@@ -108,7 +115,7 @@ Requires Rust (stable), [uv](https://docs.astral.sh/uv/) and CPython 3.12+.
 
 ```bash
 uv venv --python 3.13 .venv
-uv pip install --python .venv maturin pytest httpx ruff trustme h2
+uv pip install --python .venv maturin pytest httpx ruff trustme h2 pydantic
 uv run --python .venv maturin develop --uv
 uv run --python .venv pytest
 cargo test --workspace

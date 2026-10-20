@@ -166,6 +166,27 @@ async def logout(request: Any) -> None:
     request.state.user = AnonymousUser()
 
 
+async def read_session(cookies: Any) -> tuple[Any, Any]:
+    """``(user, read-only session data)`` for a request's cookies, without saving anything:
+    used for WebSocket connections (Feature 018)."""
+    import types
+
+    key = cookies.get(COOKIE_NAME)
+    if not key:
+        return AnonymousUser(), types.MappingProxyType({})
+    row = await (
+        Session.objects.select_related("user")
+        .filter(key_digest=_digest(key), expires__gt=_now())
+        .first()
+    )
+    if row is None:
+        return AnonymousUser(), types.MappingProxyType({})
+    user = row.user if row.user_id is not None else None
+    if user is not None and (not user.is_active or not _login_valid(row.data, user)):
+        user = None
+    return user or AnonymousUser(), types.MappingProxyType(dict(row.data))
+
+
 async def auth_middleware(request: Any, call_next: Any) -> Response:
     """Sets ``request.user`` and ``request.session``; saves sessions and cookies afterwards."""
     key = request.cookies.get(COOKIE_NAME)

@@ -40,7 +40,7 @@ def test_create_and_read():
 
 | Method | |
 |---|---|
-| `client.get/post/put/patch/delete/options(path, json=None, data=None, headers=None)` | `json=` sends JSON; `data=` sends a form; put query strings in the path |
+| `client.get/post/put/patch/delete/options(path, json=None, data=None, content=None, headers=None)` | `json=` sends JSON; `data=` sends a form; `content=` sends raw bytes (set `content-type` in `headers`); put query strings in the path |
 | `response.status_code`, `.headers` (case-insensitive), `.json()`, `.text`, `.content` | |
 | `client.cookies` | kept between requests (log in once, then call protected routes) |
 
@@ -139,5 +139,7 @@ python -m pytest
 
 - Each `TestClient` block is a separate server: rate limits and the memory cache start empty.
 - Freeze time-dependent logic by passing times in, rather than patching the clock.
+- WebSockets and streamed responses: `client.websocket_connect(path)` and
+  `client.stream(method, path)` — see [Real-time](16-realtime.md#testing).
 - `qs.sql()` shows the SQL a QuerySet runs — handy in assertions about query shapes.
 - For load tests see [Performance and scaling](12-performance-scaling.md#load-testing).

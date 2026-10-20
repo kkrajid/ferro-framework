@@ -10,7 +10,7 @@ single server, Docker, Kubernetes and platforms as a service. Ready-to-edit file
 
 | Item | How |
 |---|---|
-| Install | `pip install ferro` (wheels for Linux, macOS, Windows; Python 3.12+) in a virtual environment or image |
+| Install | `pip install ferro-framework` (wheels for Linux, macOS, Windows; Python 3.12+) in a virtual environment or image |
 | Database | PostgreSQL in production: `FERRO_DATABASE_URL=postgresql://user:pass@host:5432/db?sslmode=require` |
 | Migrations | `ferro migrate` once per release, before new code serves (a separate step or job) |
 | Admin account | `FERRO_SUPERUSER_PASSWORD=... ferro createsuperuser --username admin --no-input` |
@@ -26,6 +26,7 @@ single server, Docker, Kubernetes and platforms as a service. Ready-to-edit file
 | Metrics | `FERRO_METRICS=1`, scrape `/metrics` from `FERRO_METRICS_ALLOW` addresses |
 | Rate limits | `FERRO_RATE_LIMIT=100/minute` (shared by the processes of one machine) |
 | Cache | `App(cache="database")` for a cache shared by every process and server |
+| Real-time | WebSockets/event streams through the proxy (upgrade headers, no buffering: see the files in `deploy/`); `FERRO_BROADCAST=database` (PostgreSQL) when sockets live in several processes or servers |
 | Debug | never `--debug` in production (it shows tracebacks) |
 
 Every setting is a command-line option, an environment variable `FERRO_<NAME>` or an `App(...)`
@@ -67,7 +68,7 @@ useradd --system --no-create-home --home-dir /srv/shop --shell /usr/sbin/nologin
 mkdir /srv/shop && chown ferro:ferro /srv/shop
 sudo -u ferro git clone https://github.com/you/shop.git /srv/shop
 sudo -u ferro python3 -m venv /srv/shop/.venv
-sudo -u ferro /srv/shop/.venv/bin/pip install ferro       # plus your project's other dependencies
+sudo -u ferro /srv/shop/.venv/bin/pip install ferro-framework   # plus your project's other dependencies
 ```
 
 (Private repository: use a read-only deploy key.)
@@ -111,7 +112,9 @@ curl -s http://127.0.0.1:8000/readyz        # {"status":"ready"}
 ```text
 example.com {
 	encode zstd gzip
-	reverse_proxy 127.0.0.1:8000
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1    # stream responses and server-sent events at once
+	}
 }
 ```
 
@@ -145,7 +148,7 @@ Restore with `pg_restore -d shop shop-YYYY-MM-DD.dump`.
 set -e
 cd /srv/shop
 sudo -u ferro git pull --ff-only
-sudo -u ferro .venv/bin/pip install --upgrade ferro      # and your dependencies
+sudo -u ferro .venv/bin/pip install --upgrade ferro-framework   # and your dependencies
 sudo -u ferro .venv/bin/ferro migrate
 systemctl restart shop                                    # drains, then finishes requests in flight
 ```
@@ -235,6 +238,12 @@ router).
 - **Database pool:** each process opens up to `pool_size` connections (URL parameter
   `?pool_size=`); keep `processes × machines × pool_size` below the server's `max_connections`
   (or use PgBouncer 1.21+ with `max_prepared_statements` in transaction mode).
+- **WebSockets and event streams:** connections stay open, so proxies and load balancers need
+  idle timeouts above 60 s (Ferro pings sockets every 20 s and event streams every 15 s). On stop,
+  sockets close with code 1001 and streams are cut off; clients reconnect to another instance. The
+  `database` broadcast backend keeps one extra connection per process for `LISTEN`; it must reach
+  PostgreSQL directly or through PgBouncer in *session* mode (transaction mode drops
+  notifications). See [real-time](guide/16-realtime.md).
 - **Backups:** PostgreSQL `pg_dump`/managed snapshots; for SQLite stop the app or use
   `sqlite3 db.sqlite3 ".backup backup.sqlite3"`.
 - **Monitoring:** alert on `/readyz` failures, the 5xx share of `ferro_http_requests_total`,

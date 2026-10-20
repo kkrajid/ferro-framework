@@ -297,8 +297,7 @@ impl Publisher {
             .spawn(move || {
                 let publish = || {
                     let metrics = state.metrics.as_ref().expect("metrics are on");
-                    let text =
-                        metrics.render(state.lifecycle.in_flight(), state.dispatcher.as_ref());
+                    let text = metrics.render(&state.lifecycle, state.dispatcher.as_ref());
                     if let Some(snapshots) = &metrics.snapshots
                         && let Err(err) = snapshots.publish(&text)
                     {

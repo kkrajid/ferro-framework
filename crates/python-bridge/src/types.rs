@@ -7,6 +7,8 @@ use pyo3::types::PyType;
 pub(crate) struct Types {
     pub(crate) response: Py<PyType>,
     pub(crate) json_response: Py<PyType>,
+    pub(crate) streaming_response: Py<PyType>,
+    pub(crate) websocket_disconnect: Py<PyType>,
     pub(crate) http_exception: Py<PyType>,
     pub(crate) validation_error: Py<PyType>,
     pub(crate) cancelled_error: Py<PyType>,
@@ -33,6 +35,8 @@ pub(crate) fn types(py: Python<'_>) -> PyResult<&Types> {
         Ok(Types {
             response: class(py, "ferro.response", "Response")?,
             json_response: class(py, "ferro.response", "JSONResponse")?,
+            streaming_response: class(py, "ferro.response", "StreamingResponse")?,
+            websocket_disconnect: class(py, "ferro.websockets", "WebSocketDisconnect")?,
             http_exception: class(py, "ferro.exceptions", "HTTPException")?,
             validation_error: class(py, "ferro.exceptions", "ValidationError")?,
             cancelled_error: asyncio

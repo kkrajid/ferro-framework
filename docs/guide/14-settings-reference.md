@@ -49,12 +49,13 @@ allowed).
 | `metrics_path` | — | `/metrics` | a path |
 | `metrics_allow` | — | `127.0.0.1, ::1` | IP addresses or CIDR ranges allowed to read metrics |
 
-## Database and cache
+## Database, cache and broadcast
 
 | Setting | Option | Default | Values |
 |---|---|---|---|
 | `database_url` | `--database-url` | none | `sqlite:///path.db`, `sqlite:///:memory:`, `postgresql://user:pass@host:5432/db?...` — URL parameters in [Models](04-models-and-queries.md#connecting) |
 | `cache` | — | `memory` | `memory`, `database` |
+| `broadcast` | — | `memory` | `memory` (one process), `database` (PostgreSQL `LISTEN`/`NOTIFY`, every process and machine; refused with SQLite) — see [Real-time](16-realtime.md#broadcast-one-message-to-many-connections) |
 
 ## Security
 
@@ -76,7 +77,7 @@ Per route, on the decorators (`@app.get(path, ...)`):
 | Option | Meaning |
 |---|---|
 | `rate_limit="5/minute"` | this route's own limit |
-| `csrf=False` | exempt from the cross-origin check |
+| `csrf=False` | exempt from the cross-origin check (on `@app.websocket`: the handshake's origin check) |
 | `name="..."` | display name |
 
 ## Example `.env`
@@ -95,6 +96,7 @@ FERRO_HSTS=1
 FERRO_METRICS=1
 FERRO_METRICS_ALLOW=10.0.0.0/8
 FERRO_CACHE=database
+FERRO_BROADCAST=database
 ```
 
 ## Other environment variables

@@ -133,7 +133,7 @@ PYPROJECT = """[project]
 name = "$name"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["ferro"]
+dependencies = ["ferro-framework"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

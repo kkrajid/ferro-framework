@@ -175,6 +175,24 @@ fn internal_error(
     envelope.into_response()
 }
 
+/// Logs an exception from code that has no response to carry it (streams, sockets).
+pub(crate) fn log_failure(
+    py: Python<'_>,
+    err: &PyErr,
+    request_id: &str,
+    handler: &str,
+    what: &str,
+) {
+    let (type_name, message, traceback) = describe(py, err);
+    tracing::error!(
+        target: "ferro.handler",
+        request_id = %request_id,
+        handler = %handler,
+        "handler {handler} {what}: {type_name}: {message}\n{}",
+        traceback.join("\n")
+    );
+}
+
 fn describe(py: Python<'_>, err: &PyErr) -> (String, String, Vec<String>) {
     let value = err.value(py);
     let type_name = value

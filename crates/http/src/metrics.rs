@@ -55,8 +55,12 @@ impl Metrics {
 
     /// The metrics response: this process's numbers, plus the other workers' when the server
     /// runs several processes.
-    pub(crate) fn respond(&self, in_flight: usize, dispatcher: &dyn Dispatcher) -> String {
-        let own = self.render(in_flight, dispatcher);
+    pub(crate) fn respond(
+        &self,
+        lifecycle: &crate::lifecycle::Lifecycle,
+        dispatcher: &dyn Dispatcher,
+    ) -> String {
+        let own = self.render(lifecycle, dispatcher);
         match &self.snapshots {
             Some(snapshots) => snapshots.merged(&own),
             None => own,
@@ -86,7 +90,13 @@ impl Metrics {
         self.durations[series].observe(elapsed);
     }
 
-    pub(crate) fn render(&self, in_flight: usize, dispatcher: &dyn Dispatcher) -> String {
+    pub(crate) fn render(
+        &self,
+        lifecycle: &crate::lifecycle::Lifecycle,
+        dispatcher: &dyn Dispatcher,
+    ) -> String {
+        let in_flight = lifecycle.in_flight();
+        let (sockets, streams) = lifecycle.open_connections();
         let mut out = String::with_capacity(4096);
         let total = "ferro_http_requests_total";
         type_line(&mut out, total, "counter");
@@ -107,6 +117,10 @@ impl Metrics {
         });
         type_line(&mut out, "ferro_http_requests_in_flight", "gauge");
         let _ = writeln!(out, "ferro_http_requests_in_flight {in_flight}");
+        type_line(&mut out, "ferro_websocket_connections", "gauge");
+        let _ = writeln!(out, "ferro_websocket_connections {sockets}");
+        type_line(&mut out, "ferro_http_streams_open", "gauge");
+        let _ = writeln!(out, "ferro_http_streams_open {streams}");
         dispatcher.write_metrics(&mut out);
         type_line(&mut out, "ferro_process_start_time_seconds", "gauge");
         let _ = writeln!(out, "ferro_process_start_time_seconds {}", self.started_at);
@@ -114,7 +128,7 @@ impl Metrics {
         let _ = writeln!(
             out,
             "ferro_build_info{{version=\"{}\"}} 1",
-            env!("CARGO_PKG_VERSION")
+            python_version(env!("CARGO_PKG_VERSION"))
         );
         out
     }
@@ -130,5 +144,34 @@ impl Metrics {
                 );
             }
         }
+    }
+}
+
+/// The version as Python packages spell it (PEP 440), the one `ferro --version` shows: Cargo's
+/// `0.5.0-rc.1` is `0.5.0rc1`.
+fn python_version(cargo: &str) -> String {
+    let Some((release, pre)) = cargo.split_once('-') else {
+        return cargo.to_string();
+    };
+    let (kind, number) = pre.split_once('.').unwrap_or((pre, ""));
+    let short = match kind {
+        "alpha" => "a",
+        "beta" => "b",
+        "rc" => "rc",
+        _ => return cargo.to_string(),
+    };
+    format!("{release}{short}{number}")
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::python_version;
+
+    #[test]
+    fn cargo_versions_are_spelled_as_python_versions() {
+        assert_eq!(python_version("0.5.0-rc.1"), "0.5.0rc1");
+        assert_eq!(python_version("1.0.0-alpha.2"), "1.0.0a2");
+        assert_eq!(python_version("1.0.0-beta.3"), "1.0.0b3");
+        assert_eq!(python_version("1.0.0"), "1.0.0");
     }
 }

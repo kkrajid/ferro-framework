@@ -172,7 +172,7 @@ each has its own interpreter, I/O threads (`--workers` is per process) and datab
 
 ```bash
 ferro run --processes 4 --workers 2
-# Ferro 0.5.0rc1 serving app:app on http://127.0.0.1:8000 (production mode, 4 processes, 2 workers each)
+# Ferro 0.5.0rc2 serving app:app on http://127.0.0.1:8000 (production mode, 4 processes, 2 workers each)
 ```
 
 - A worker that crashes is restarted; workers that keep failing right after starting (an
@@ -246,7 +246,7 @@ others get 404). Metrics are per process.
 
 ```bash
 ferro run --host 0.0.0.0 --port 443 --tls-cert /etc/ferro/fullchain.pem --tls-key /etc/ferro/privkey.pem
-# Ferro 0.5.0rc1 serving app:app on https://0.0.0.0:443 (production mode, 8 workers)
+# Ferro 0.5.0rc2 serving app:app on https://0.0.0.0:443 (production mode, 8 workers)
 ```
 
 The listener then speaks TLS 1.2/1.3 only and offers HTTP/2 next to HTTP/1.1 (ALPN; clients

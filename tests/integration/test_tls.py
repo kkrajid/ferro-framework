@@ -39,6 +39,18 @@ async def echo(request):
 async def slow():
     await asyncio.sleep(0.2)
     return {"ok": True}
+
+
+@app.get("/events")
+async def events():
+    from ferro import EventStream
+
+    async def produce():
+        for n in range(3):
+            yield {"n": n}
+            await asyncio.sleep(0.05)
+
+    return EventStream(produce())
 """
 
 
@@ -174,6 +186,11 @@ def test_https_over_http1_and_http2(tmp_path, certs, processes):
             assert h2.post("/echo", content=b"x" * 10_000).status_code == 413
             assert h2.get("/missing").status_code == 404
             assert h2.get("/readyz").json() == {"status": "ready"}
+            # Server-sent events over HTTP/2 (Feature 018).
+            with h2.stream("GET", "/events") as streamed:
+                assert streamed.http_version == "HTTP/2"
+                lines = [line for line in streamed.iter_lines() if line.startswith("data:")]
+            assert lines == ['data: {"n":0}', 'data: {"n":1}', 'data: {"n":2}']
         # SC-002: 50 concurrent requests multiplexed on one connection. (httpx's sync HTTP/2
         # client handles one response at a time, so the streams are driven directly.)
         statuses, elapsed = multiplexed(port, context, "/slow", 50)

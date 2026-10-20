@@ -162,7 +162,7 @@ cookie key, rotate the key at login, end after 30 days or on a password change.
 - [ ] `/metrics` restricted (`metrics_allow`) or blocked at the proxy
 - [ ] `.env` not committed; secrets in the platform's secret store
 - [ ] `ferro makemigrations --check` in CI
-- [ ] dependencies updated (`pip install --upgrade ferro`) when a security release appears —
+- [ ] dependencies updated (`pip install --upgrade ferro-framework`) when a security release appears —
       see [SECURITY.md](../../SECURITY.md)
 
 The last full review is [docs/security-audit.md](../security-audit.md).

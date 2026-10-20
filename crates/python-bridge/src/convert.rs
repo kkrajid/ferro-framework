@@ -91,6 +91,34 @@ fn content(value: &Bound<'_, PyAny>) -> Result<(Bytes, Option<&'static str>), Co
     }
 }
 
+/// Status and headers of a `Response` object, without its body (streaming responses).
+pub(crate) fn head(value: &Bound<'_, PyAny>) -> Result<FerroResponse, ConvertError> {
+    let py = value.py();
+    let status: i64 = value.getattr(intern!(py, "status"))?.extract()?;
+    let status = u16::try_from(status)
+        .ok()
+        .filter(|s| (100..=599).contains(s))
+        .ok_or(ConvertError::InvalidStatus(status))?;
+    let media_type: Option<String> = value.getattr(intern!(py, "media_type"))?.extract()?;
+    let headers: Vec<(String, String)> = value.getattr(intern!(py, "headers"))?.extract()?;
+    let mut response = FerroResponse::new(status);
+    for (name, header_value) in headers {
+        if !is_valid_header_name(&name) || !is_valid_header_value(&header_value) {
+            return Err(ConvertError::InvalidHeader(name));
+        }
+        response.headers.push((name, header_value));
+    }
+    if !response.has_header("content-type")
+        && let Some(media_type) = media_type
+    {
+        if !is_valid_header_value(&media_type) {
+            return Err(ConvertError::InvalidHeader("content-type".into()));
+        }
+        response.headers.push(("content-type".into(), media_type));
+    }
+    Ok(response)
+}
+
 fn from_response_object(
     value: &Bound<'_, PyAny>,
     force_json: bool,

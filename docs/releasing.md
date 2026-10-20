@@ -10,10 +10,10 @@ repository.
 2. On GitHub: Settings → Environments → create `pypi` (add yourself as required reviewer to
    approve each publish); Settings → Code security → enable private vulnerability reporting.
 3. On [pypi.org](https://pypi.org): create the project through a *pending trusted publisher*
-   (Account → Publishing → "Add a new pending publisher"): project `ferro`, owner/repository,
-   workflow `release.yml`, environment `pypi`. No API token is created or stored.
-   If the name `ferro` is taken on PyPI, choose another distribution name in `pyproject.toml`
-   (`[project] name`) — the import name `ferro` can stay.
+   (Account → Publishing → "Add a new pending publisher"): project `ferro-framework`,
+   owner/repository, workflow `release.yml`, environment `pypi`. No API token is created or
+   stored. (The distribution is `ferro-framework` because `ferro` is taken on PyPI; the import
+   name and the command stay `ferro`.)
 
 ## Every release
 
@@ -33,14 +33,14 @@ repository.
    operating systems × Python 3.12/3.13) and runs `scripts/smoke_test.py`. When everything
    passes, the `publish` job waits for approval in the `pypi` environment (**maintainer**), then
    uploads to PyPI and creates the GitHub release with the artifacts.
-6. Check `pip install ferro==0.5.0rc1` in a fresh environment.
+6. Check `pip install ferro-framework==0.5.0rc1` in a fresh environment.
 
 ## Building locally
 
 ```bash
 maturin build --release --locked --out dist   # wheel for this machine
 maturin sdist --out dist                      # source distribution
-python -m venv /tmp/check && /tmp/check/bin/pip install dist/ferro-*.whl
+python -m venv /tmp/check && /tmp/check/bin/pip install dist/ferro_framework-*.whl
 /tmp/check/bin/python scripts/smoke_test.py
 ```
 

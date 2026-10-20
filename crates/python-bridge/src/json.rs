@@ -2,9 +2,11 @@
 //!
 //! Encoding follows Python's `json` module where it matters to users (key coercion, exact big
 //! integers, NaN rejection) and additionally supports `datetime`/`date`/`time` (ISO 8601),
-//! `Decimal` and `UUID` (as strings). Non-ASCII text is written as UTF-8, not escaped.
+//! `Decimal` and `UUID` (as strings) and Pydantic models (their own JSON, Feature 019).
+//! Non-ASCII text is written as UTF-8, not escaped.
 
 use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use serde_json::Value;
@@ -135,10 +137,29 @@ fn write_value(
         || value.is_instance(types.uuid.bind(value.py()))?
     {
         write_str(out, value.str()?.to_str()?);
+    } else if let Some(json) = pydantic_json(value)? {
+        out.extend_from_slice(json.as_bytes());
     } else {
         return Err(EncodeError::Unsupported(type_name(value)));
     }
     Ok(())
+}
+
+/// The JSON of a Pydantic model, written by Pydantic's own serializer (`model_dump_json()`, JSON
+/// mode: decimals and UUIDs as strings, ISO 8601 dates), or `None` for any other object. Only
+/// values of no other supported type get here, so Ferro never needs Pydantic installed.
+fn pydantic_json(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    let py = value.py();
+    if !value
+        .get_type()
+        .hasattr(intern!(py, "__pydantic_serializer__"))?
+    {
+        return Ok(None);
+    }
+    let Ok(dump) = value.getattr(intern!(py, "model_dump_json")) else {
+        return Ok(None);
+    };
+    Ok(Some(dump.call0()?.extract()?))
 }
 
 fn is_any_instance(

@@ -29,6 +29,7 @@ dependencies = [
  "actix-service",
  "actix-tls",
  "actix-utils",
+ "base64",
  "bitflags",
  "bytes",
  "bytestring",
@@ -42,9 +43,12 @@ dependencies = [
  "httpdate",
  "itoa",
  "language-tags",
+ "local-channel",
  "mime",
  "percent-encoding",
  "pin-project-lite",
+ "rand",
+ "sha1",
  "smallvec",
  "tokio",
  "tokio-util",
@@ -179,6 +183,20 @@ dependencies = [
  "time",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "actix-ws"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12d4f2fbee3ef7a22fa6cb0e416b962237a167ed0419f22d4e451da2d7f082f8"
+dependencies = [
+ "actix-codec",
+ "actix-http",
+ "actix-web",
+ "bytestring",
+ "futures-core",
+ "tokio",
 ]
 
 [[package]]
@@ -646,29 +664,31 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "ferro-core"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "argon2",
  "bytes",
  "ferro-shared",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid",
 ]
 
 [[package]]
 name = "ferro-database"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "async-channel",
 ]
 
 [[package]]
 name = "ferro-http"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "actix-rt",
  "actix-web",
+ "actix-ws",
  "bytes",
  "ferro-core",
  "ferro-router",
@@ -685,7 +705,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-migrations"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "ferro-database",
  "ferro-orm",
@@ -693,14 +713,14 @@ dependencies = [
 
 [[package]]
 name = "ferro-orm"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "ferro-database",
 ]
 
 [[package]]
 name = "ferro-postgres"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "async-channel",
  "bytes",
@@ -710,12 +730,13 @@ dependencies = [
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
+ "tracing",
  "webpki-roots",
 ]
 
 [[package]]
 name = "ferro-python"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "bytes",
  "ferro-core",
@@ -737,7 +758,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-router"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "ferro-core",
  "percent-encoding",
@@ -745,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-shared"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "memmap2",
  "tempfile",
@@ -753,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-sqlite"
-version = "0.5.0-rc.1"
+version = "0.5.0-rc.2"
 dependencies = [
  "crossbeam-channel",
  "ferro-database",
@@ -1151,6 +1172,17 @@ name = "litemap"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
+
+[[package]]
+name = "local-channel"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6cbc85e69b8df4b8bb8b89ec634e7189099cea8927a276b7384ce5488e53ec8"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "local-waker",
+]
 
 [[package]]
 name = "local-waker"
@@ -1791,6 +1823,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aacc4cc499359472b4abe1bf11d0b12e688af9a805fa5e3016f9a386dc2d0214"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.1",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sha2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2072,7 +2115,19 @@ dependencies = [
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
+ "tokio-macros",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tokio-macros"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.7",
 ]
 
 [[package]]

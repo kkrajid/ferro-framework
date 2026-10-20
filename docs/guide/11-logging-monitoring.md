@@ -90,6 +90,8 @@ FERRO_METRICS_PATH=/metrics
 | `ferro_http_requests_total` | counter | `route` (the pattern, e.g. `/notes/{id}`), `method`, `status` (`2xx`, `4xx`, …) |
 | `ferro_http_request_duration_seconds` | histogram | `route`, `method` |
 | `ferro_http_requests_in_flight` | gauge | |
+| `ferro_websocket_connections` | gauge | open WebSockets |
+| `ferro_http_streams_open` | gauge | streamed responses and event streams being sent |
 | `ferro_db_queries_total` | counter | `outcome` (`ok`, `error`, `unavailable`) |
 | `ferro_db_query_duration_seconds` | histogram | |
 | `ferro_process_start_time_seconds` | gauge | |

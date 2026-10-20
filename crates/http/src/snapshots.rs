@@ -93,7 +93,9 @@ enum Rule {
 
 fn rule(family: &str) -> Rule {
     match family {
-        "ferro_http_requests_in_flight" => Rule::LiveSum,
+        "ferro_http_requests_in_flight"
+        | "ferro_websocket_connections"
+        | "ferro_http_streams_open" => Rule::LiveSum,
         "ferro_process_start_time_seconds" => Rule::Min,
         "ferro_build_info" => Rule::Max,
         _ => Rule::Sum,

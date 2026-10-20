@@ -25,6 +25,8 @@ pub struct RouteOptions {
     pub csrf: bool,
     /// Replaces the global rate limit for this route.
     pub rate_limit: Option<RateSpec>,
+    /// A WebSocket endpoint: GET requests must upgrade (Feature 018).
+    pub websocket: bool,
 }
 
 impl Default for RouteOptions {
@@ -32,6 +34,7 @@ impl Default for RouteOptions {
         Self {
             csrf: true,
             rate_limit: None,
+            websocket: false,
         }
     }
 }
@@ -161,6 +164,11 @@ impl Policy {
             (Some(cors), Some(origin)) => cors.response_headers(origin).unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    /// Whether `route_id` is a WebSocket endpoint.
+    pub fn is_websocket(&self, route_id: usize) -> bool {
+        self.routes.get(route_id).is_some_and(|r| r.websocket)
     }
 
     /// Takes a token from the route's (or the global) budget of `client`.

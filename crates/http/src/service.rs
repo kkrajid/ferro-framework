@@ -81,6 +81,54 @@ enum BodyError {
     Incomplete,
 }
 
+/// What routing produced: a response to send, or a connection already upgraded to WebSocket.
+enum Reply {
+    Ferro(FerroResponse),
+    Upgraded(HttpResponse),
+}
+
+/// Accepts a WebSocket handshake and starts the connection (Feature 018).
+fn upgrade(
+    req: &HttpRequest,
+    payload: web::Payload,
+    state: &State,
+    request: FerroRequest,
+) -> Reply {
+    let request_id = request.request_id.clone();
+    if !crate::socket::wants_upgrade(req) {
+        return Reply::Ferro(
+            ErrorEnvelope::new(426, &request_id)
+                .with_message("This address only accepts WebSocket connections")
+                .with_header("upgrade", "websocket")
+                .with_header("connection", "upgrade")
+                .into_response(),
+        );
+    }
+    match actix_ws::handle(req, payload) {
+        Ok((response, session, frames)) => {
+            let link = Arc::new(ferro_core::SocketLink::new());
+            let events = state.dispatcher.open_socket(request, link.clone());
+            let frames = frames
+                .max_frame_size(state.max_body_size)
+                .aggregate_continuations()
+                .max_continuation_size(state.max_body_size);
+            actix_web::rt::spawn(crate::socket::run(
+                session,
+                frames,
+                link,
+                events,
+                state.lifecycle.clone(),
+            ));
+            Reply::Upgraded(response)
+        }
+        Err(_) => Reply::Ferro(
+            ErrorEnvelope::new(400, &request_id)
+                .with_message("Invalid WebSocket handshake")
+                .into_response(),
+        ),
+    }
+}
+
 pub(crate) async fn handle(
     req: HttpRequest,
     payload: web::Payload,
@@ -117,7 +165,7 @@ pub(crate) async fn handle(
             FerroResponse::new(200)
                 .with_header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                 .with_header("cache-control", "no-store")
-                .with_body(metrics.respond(state.lifecycle.in_flight(), state.dispatcher.as_ref()))
+                .with_body(metrics.respond(&state.lifecycle, state.dispatcher.as_ref()))
         } else {
             // As if metrics were off: nothing tells an outsider they exist.
             ErrorEnvelope::new(404, &request_id).into_response()
@@ -135,17 +183,40 @@ pub(crate) async fn handle(
     }
     let in_flight = state.lifecycle.enter();
     let origin = header(&req, "origin");
-    let (mut response, close, route_id) = match preflight(&req, &state, &request_id, origin) {
-        Some(answer) => (answer, false, None),
+    let (reply, close, route_id) = match preflight(&req, &state, &request_id, origin) {
+        Some(answer) => (Reply::Ferro(answer), false, None),
         None => route(&req, payload, &state, &request_id, client, started).await,
     };
-    for (name, value) in state.policy.cors_headers(origin) {
-        if !response.has_header(&name) {
-            response.headers.push((name, value));
+    let (status, http) = match reply {
+        Reply::Ferro(mut response) => {
+            for (name, value) in state.policy.cors_headers(origin) {
+                if !response.has_header(&name) {
+                    response.headers.push((name, value));
+                }
+            }
+            let stream = response.stream.take().and_then(|stream| stream.take());
+            let status = response.status;
+            let http = into_http(response, &request_id, close, &state.policy);
+            let http = match stream {
+                // Headers go now; the body follows chunk by chunk (Feature 018).
+                Some(source) => http
+                    .set_body(actix_web::body::BodyStream::new(crate::socket::chunks(
+                        source,
+                        state.lifecycle.clone(),
+                    )))
+                    .map_into_boxed_body(),
+                None => http,
+            };
+            (status, http)
         }
-    }
-    let status = response.status;
-    let http = into_http(response, &request_id, close, &state.policy);
+        Reply::Upgraded(mut http) => {
+            if let Ok(value) = HeaderValue::from_str(&request_id) {
+                http.headers_mut()
+                    .insert(HeaderName::from_static("x-request-id"), value);
+            }
+            (101, http)
+        }
+    };
     tracing::info!(
         target: "ferro.access",
         method = %req.method(),
@@ -240,7 +311,7 @@ async fn route(
     request_id: &str,
     client: Option<std::net::SocketAddr>,
     started: Instant,
-) -> (FerroResponse, bool, Option<usize>) {
+) -> (Reply, bool, Option<usize>) {
     // One deadline for receiving the body and running the handler (Feature 011 FR-015).
     let deadline = tokio::time::Instant::from_std(started) + state.request_timeout;
     let raw_path = req.uri().path();
@@ -257,7 +328,11 @@ async fn route(
             {
                 let envelope = ErrorEnvelope::new(429, request_id)
                     .with_header("retry-after", retry.as_secs().to_string());
-                return (envelope.into_response(), false, Some(route_id));
+                return (
+                    Reply::Ferro(envelope.into_response()),
+                    false,
+                    Some(route_id),
+                );
             }
             let scheme = if state.tls {
                 "https"
@@ -267,9 +342,17 @@ async fn route(
                     header(req, "x-forwarded-proto"),
                 )
             };
+            let websocket = state.policy.is_websocket(route_id);
+            // A WebSocket handshake is checked like an unsafe request: a page on another site
+            // must not open a socket carrying the user's cookies (Feature 018).
+            let checked_method = if websocket {
+                "WEBSOCKET"
+            } else {
+                req.method().as_str()
+            };
             if !state.policy.csrf_allows(
                 route_id,
-                req.method().as_str(),
+                checked_method,
                 scheme,
                 host(req),
                 header(req, "sec-fetch-site"),
@@ -278,7 +361,25 @@ async fn route(
             ) {
                 let envelope = ErrorEnvelope::new(403, request_id)
                     .with_message("Cross-origin request refused");
-                return (envelope.into_response(), false, Some(route_id));
+                return (
+                    Reply::Ferro(envelope.into_response()),
+                    false,
+                    Some(route_id),
+                );
+            }
+            if websocket {
+                let request = FerroRequest {
+                    route_id,
+                    method: req.method().as_str().to_string(),
+                    raw_path: raw_path.to_string(),
+                    query_string: query.to_string(),
+                    path_params: params,
+                    headers: request_headers(req),
+                    client,
+                    request_id: request_id.to_string(),
+                    body: Bytes::new(),
+                };
+                return (upgrade(req, payload, state, request), false, Some(route_id));
             }
             let body = match tokio::time::timeout_at(
                 deadline,
@@ -290,14 +391,14 @@ async fn route(
                 // The client is too slow sending its body: answer and drop the connection.
                 Err(_) => {
                     return (
-                        ErrorEnvelope::new(408, request_id).into_response(),
+                        Reply::Ferro(ErrorEnvelope::new(408, request_id).into_response()),
                         true,
                         Some(route_id),
                     );
                 }
                 Ok(Err(BodyError::TooLarge)) => {
                     return (
-                        ErrorEnvelope::new(413, request_id).into_response(),
+                        Reply::Ferro(ErrorEnvelope::new(413, request_id).into_response()),
                         true,
                         Some(route_id),
                     );
@@ -305,7 +406,7 @@ async fn route(
                 Ok(Err(BodyError::Incomplete)) => {
                     let envelope = ErrorEnvelope::new(400, request_id)
                         .with_message("Request body could not be read");
-                    return (envelope.into_response(), true, Some(route_id));
+                    return (Reply::Ferro(envelope.into_response()), true, Some(route_id));
                 }
             };
             let request = FerroRequest {
@@ -321,12 +422,14 @@ async fn route(
             };
             let dispatched = state.dispatcher.dispatch(request);
             match tokio::time::timeout_at(deadline, dispatched).await {
-                Ok(response) => (response, false, Some(route_id)),
+                Ok(response) => (Reply::Ferro(response), false, Some(route_id)),
                 // The dispatch future is dropped here, which cancels the handler.
                 Err(_) => (
-                    ErrorEnvelope::new(503, request_id)
-                        .with_header("retry-after", "1")
-                        .into_response(),
+                    Reply::Ferro(
+                        ErrorEnvelope::new(503, request_id)
+                            .with_header("retry-after", "1")
+                            .into_response(),
+                    ),
                     false,
                     Some(route_id),
                 ),
@@ -336,7 +439,7 @@ async fn route(
             let allow: Vec<&str> = allowed.iter().map(|m| m.as_str()).collect();
             let envelope =
                 ErrorEnvelope::new(405, request_id).with_header("allow", allow.join(", "));
-            (envelope.into_response(), false, None)
+            (Reply::Ferro(envelope.into_response()), false, None)
         }
         // A protocol-relative location ("//host", or "/\host", which browsers read the same way)
         // would be an open redirect.
@@ -349,10 +452,10 @@ async fn route(
                 format!("{location}?{query}")
             };
             let envelope = ErrorEnvelope::new(308, request_id).with_header("location", location);
-            (envelope.into_response(), false, None)
+            (Reply::Ferro(envelope.into_response()), false, None)
         }
         Match::Redirect { .. } | Match::NotFound => (
-            ErrorEnvelope::new(404, request_id).into_response(),
+            Reply::Ferro(ErrorEnvelope::new(404, request_id).into_response()),
             false,
             None,
         ),

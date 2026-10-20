@@ -23,8 +23,11 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 ```
 
 ```bash
-pip install ferro
+pip install ferro-framework
 ```
+
+The package is called `ferro-framework` on PyPI (the name `ferro` belongs to an unrelated
+project); you still `import ferro` and run the `ferro` command.
 
 Until the first release is on PyPI, install from GitHub (this builds the engine, so it needs a
 [Rust toolchain](https://rustup.rs) 1.85+; it takes a few minutes):
@@ -36,7 +39,7 @@ pip install "git+https://github.com/kkrajid/ferro-framework"
 or from a wheel file someone built for you:
 
 ```bash
-pip install ferro-0.5.0rc1-cp312-abi3-win_amd64.whl
+pip install ferro_framework-0.5.0rc2-cp312-abi3-win_amd64.whl
 ```
 
 Check it:
@@ -46,7 +49,7 @@ ferro --version
 ```
 
 ```text
-Ferro 0.5.0rc1
+Ferro 0.5.0rc2
 ```
 
 ## Create a project
@@ -85,7 +88,7 @@ ordinary classes.
 ## Upgrading
 
 ```bash
-pip install --upgrade ferro
+pip install --upgrade ferro-framework
 ```
 
 Read the [changelog](../../CHANGELOG.md) first. Within a minor series (0.5.x) nothing public
@@ -104,7 +107,7 @@ uv venv --python 3.13 .venv
 ```
 
 ```bash
-uv pip install --python .venv maturin pytest httpx ruff trustme h2
+uv pip install --python .venv maturin pytest httpx ruff trustme h2 pydantic
 ```
 
 ```bash

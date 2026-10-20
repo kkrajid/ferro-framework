@@ -30,7 +30,15 @@ pub(crate) fn parse_path(path: &str) -> PyResult<Vec<String>> {
 }
 
 /// `(methods, path, endpoint, name, rate_limit, csrf)`.
-type RouteRecord = (Vec<String>, String, Py<PyAny>, String, Option<String>, bool);
+type RouteRecord = (
+    Vec<String>,
+    String,
+    Py<PyAny>,
+    String,
+    Option<String>,
+    bool,
+    bool,
+);
 
 /// Everything `start` needs, built by `new`.
 type Pending = (Router, Vec<RouteOptions>, Arc<PyDispatcher>);
@@ -60,7 +68,7 @@ impl Server {
         let mut builder = Router::builder();
         let mut endpoints: Vec<Endpoint> = Vec::with_capacity(routes.len());
         let mut options: Vec<RouteOptions> = Vec::with_capacity(routes.len());
-        for (route_id, (methods, path, func, name, rate_limit, csrf)) in
+        for (route_id, (methods, path, func, name, rate_limit, csrf, websocket)) in
             routes.into_iter().enumerate()
         {
             let rate_limit = rate_limit
@@ -68,7 +76,11 @@ impl Server {
                 .map(RateSpec::parse)
                 .transpose()
                 .map_err(|err| PyValueError::new_err(format!("route {path} ({name}): {err}")))?;
-            options.push(RouteOptions { csrf, rate_limit });
+            options.push(RouteOptions {
+                csrf,
+                rate_limit,
+                websocket,
+            });
             let methods: Vec<Method> = methods.iter().map(|m| Method::parse(m)).collect();
             builder.add(&methods, &path, route_id).map_err(|err| {
                 let message = match &err {

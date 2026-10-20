@@ -29,6 +29,10 @@ server — no Gunicorn, Uvicorn or Daphne needed.
 9. [Security](guide/09-security.md) — CSRF, CORS, rate limits, headers, cookies, proxies, HTTPS
 10. [Testing](guide/10-testing.md)
 11. [Logging, health checks and metrics](guide/11-logging-monitoring.md)
+12. [Real-time: WebSockets, server-sent events and streaming](guide/16-realtime.md) —
+    chat, notifications, progress, large downloads, broadcast across processes
+13. [Request and response models with Pydantic](guide/17-pydantic.md) — validated bodies,
+    response models from ORM objects, 422 errors
 
 ## Running in production
 

@@ -49,6 +49,7 @@ class RouteRecord:
     name: str
     rate_limit: str | None = None
     csrf: bool = True
+    websocket: bool = False
 
 
 def _qualified_name(handler: Callable[..., Any]) -> str:
@@ -119,6 +120,7 @@ class App:
         tls_cert: str | None = None,
         tls_key: str | None = None,
         cache: str | None = None,
+        broadcast: str | None = None,
     ) -> None:
         given = {
             "debug": debug,
@@ -152,6 +154,7 @@ class App:
             "tls_cert": tls_cert,
             "tls_key": tls_key,
             "cache": cache,
+            "broadcast": broadcast,
         }
         self._settings: dict[str, Any] = {k: v for k, v in given.items() if v is not None}
         if cache == "database":
@@ -225,6 +228,45 @@ class App:
             return handler
 
         return decorator
+
+    def websocket(
+        self,
+        path: str,
+        *,
+        name: str | None = None,
+        rate_limit: str | None = None,
+        csrf: bool = True,
+    ) -> Callable[[H], H]:
+        """Registers an ``async def handler(ws, ...)`` for WebSocket connections at ``path``
+        (Feature 018). ``ws`` is a :class:`ferro.websockets.WebSocket`; other parameters come
+        from the path and the query string as for HTTP routes. The handshake is rate limited
+        and checked like an unsafe request (``csrf=False`` exempts it). With ``add_auth()``,
+        ``ws.user`` and ``ws.session`` are loaded from the session cookie."""
+        if rate_limit is not None:
+            rate_limit = check_rate_limit(rate_limit, f"route {path!r}")
+        try:
+            params = _ferro.parse_path(path)
+        except (ValueError, TypeError) as exc:
+            raise ConfigurationError(str(exc)) from None
+
+        def decorator(handler: H) -> H:
+            from ferro.routing import build_websocket_endpoint
+
+            handler_name = name or _qualified_name(handler)
+            endpoint = build_websocket_endpoint(handler, params, handler_name, self._load_user)
+            self._routes.append(
+                RouteRecord(("GET",), path, handler, endpoint, handler_name, rate_limit, csrf, True)
+            )
+            return handler
+
+        return decorator
+
+    async def _load_user(self, ws: Any) -> None:
+        """Gives a WebSocket the session's user when authentication is installed."""
+        from ferro.auth.sessions import auth_middleware, read_session
+
+        if auth_middleware in self._middleware:
+            ws.user, ws.session = await read_session(ws.cookies)
 
     def get(self, path: str, **options: Any) -> Callable[[H], H]:
         return self.route(path, ["GET"], **options)

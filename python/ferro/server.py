@@ -61,10 +61,13 @@ class ServerRunner:
             (
                 list(route.methods),
                 route.path,
-                compose(app._middleware, route.endpoint) if app._middleware else route.endpoint,
+                route.endpoint
+                if route.websocket or not app._middleware
+                else compose(app._middleware, route.endpoint),
                 route.name,
                 route.rate_limit,
                 route.csrf,
+                route.websocket,
             )
             for route in app.route_records
         ]
@@ -93,6 +96,9 @@ class ServerRunner:
         from ferro import cache
 
         cache.apply_setting(self.settings.cache)
+        from ferro import broadcast
+
+        broadcast.apply_setting(self.settings.broadcast)
         try:
             if self.settings.database_url is not None:
                 db.connect_now(self.settings.database_url)
@@ -141,6 +147,9 @@ class ServerRunner:
             self._loop.close()
         self._executor.shutdown(wait=False, cancel_futures=True)
         self.app._bind_executor(None)
+        from ferro.broadcast import broadcast
+
+        broadcast._stop()  # its listener belongs to this server's event loop
         if self._owns_database:
             db.disconnect_now()
             self._owns_database = False

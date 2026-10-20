@@ -17,6 +17,7 @@ mod orm;
 mod orm_query;
 mod orm_values;
 mod passwords;
+mod realtime;
 mod request;
 mod server;
 mod session;
@@ -32,6 +33,10 @@ fn _ferro(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<request::Headers>()?;
     m.add_class::<request::Ready>()?;
     m.add_class::<server::Server>()?;
+    m.add_class::<realtime::Socket>()?;
+    m.add_class::<realtime::BroadcastListener>()?;
+    m.add_function(wrap_pyfunction!(realtime::broadcast_listen, m)?)?;
+    m.add_function(wrap_pyfunction!(realtime::broadcast_publish, m)?)?;
     m.add_function(wrap_pyfunction!(server::parse_path, m)?)?;
     m.add_function(wrap_pyfunction!(server::check_tls, m)?)?;
     m.add_function(wrap_pyfunction!(server::create_shared_state, m)?)?;

@@ -137,6 +137,7 @@ Ferro applications are stateless when you keep state in the database:
 | `cache="memory"`, module globals | one process | ❌ per process |
 | Rate limits | shared memory of one machine | per machine — enforce global limits at the load balancer/API gateway |
 | Metrics | per machine | ✅ scrape every machine; Prometheus sums |
+| Open WebSockets and event streams | the process holding them | ✅ with `broadcast="database"` (PostgreSQL): a message published anywhere reaches every subscriber; no sticky sessions needed |
 
 Recipe:
 
@@ -147,6 +148,12 @@ Recipe:
 4. Run `ferro migrate` once per release, before the new version takes traffic.
 5. Size the database connections with the formula above.
 6. Set `FERRO_TRUSTED_PROXIES` to the load balancer's addresses.
+
+Long-lived connections (WebSockets, event streams) count against `max_connections` (10,000 per
+process by default) and cost one Python task each while they wait — thousands per process are
+fine. Spread them by adding processes or machines; watch `ferro_websocket_connections` and
+`ferro_http_streams_open`. A rolling deploy closes sockets with code 1001: clients must
+reconnect (see [Real-time](16-realtime.md#deployment)).
 
 On Kubernetes, scale on CPU with a HorizontalPodAutoscaler; one process per pod keeps the
 signal clear. See the [deployment guide](../deployment.md#4-kubernetes).

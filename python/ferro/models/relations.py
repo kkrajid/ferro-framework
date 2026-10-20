@@ -14,7 +14,7 @@ Reading ``product.category`` never queries: the object must have been loaded wit
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from ferro.models.exceptions import FieldError, RelatedNotLoaded
@@ -209,8 +209,23 @@ def _require_pk(instance: Any, what: str) -> Any:
 class _Delegating:
     """Queryset methods of a manager: each call starts from ``all()``."""
 
+    instance: Any
+    accessor: str
+
     def all(self) -> QuerySet[Any]:
         raise NotImplementedError
+
+    def __iter__(self) -> Iterator[Any]:
+        """The related objects loaded with ``prefetch_related``/``fetch_related`` (iterating never
+        queries, so response models can read them); ``RelatedNotLoaded`` otherwise."""
+        cache = self.instance.__dict__.get("_related")
+        if cache is None or self.accessor not in cache:
+            raise RelatedNotLoaded(
+                f"{type(self.instance).__name__}.{self.accessor} is not loaded; use "
+                f".prefetch_related({self.accessor!r}) on the query or "
+                f"`await obj.fetch_related({self.accessor!r})`"
+            )
+        return iter(list(cache[self.accessor]))
 
     def __getattr__(self, name: str) -> Any:
         if name.startswith("_"):

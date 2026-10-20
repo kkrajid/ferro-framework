@@ -29,6 +29,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use tokio::sync::oneshot;
 
+use crate::realtime::{self, BridgeEvents, SocketShared};
 use crate::request::Request;
 use crate::types::types;
 use crate::{convert, errors};
@@ -62,10 +63,17 @@ struct StartJob {
 /// future); queued without it.
 pub(crate) type LoopCall = Box<dyn FnOnce(Python<'_>) + Send>;
 
+struct SocketJob {
+    request: FerroRequest,
+    shared: Arc<SocketShared>,
+}
+
 enum Job {
     Start(Box<StartJob>),
     Cancel(Arc<CallState>),
     Call(LoopCall),
+    /// An accepted WebSocket connection whose handler must start (Feature 018).
+    Socket(Box<SocketJob>),
 }
 
 static REQUEST_ID: pyo3::sync::PyOnceLock<Py<PyAny>> = pyo3::sync::PyOnceLock::new();
@@ -120,6 +128,8 @@ pub(crate) struct Executor {
     debug: bool,
     /// The [`Drain`] callable scheduled on the loop (it refers back weakly).
     drain: OnceLock<Py<PyAny>>,
+    /// This executor, for objects that outlive a call (streams, sockets).
+    me: OnceLock<Weak<Executor>>,
 }
 
 impl Executor {
@@ -131,7 +141,16 @@ impl Executor {
             endpoints,
             debug,
             drain: OnceLock::new(),
+            me: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn event_loop(&self) -> &Py<PyAny> {
+        &self.event_loop
+    }
+
+    fn me(&self) -> Weak<Executor> {
+        self.me.get().cloned().unwrap_or_default()
     }
 
     /// Queues `call` for the event-loop thread (from any thread, without the interpreter).
@@ -167,8 +186,17 @@ impl Executor {
         self.drain_pending.store(false, Ordering::Release);
         let jobs: Vec<Job> = lock(&self.queue).drain(..).collect();
         for job in jobs {
-            if let Job::Start(job) = job {
-                let _ = job.reply.send(unavailable(&job.request.request_id));
+            match job {
+                Job::Start(job) => {
+                    let _ = job.reply.send(unavailable(&job.request.request_id));
+                }
+                Job::Socket(job) => {
+                    job.shared.link().close(
+                        ferro_core::socket::close_code::INTERNAL,
+                        "the server is stopping",
+                    );
+                }
+                _ => {}
             }
         }
     }
@@ -210,6 +238,10 @@ impl Executor {
                     }
                 }
                 Job::Call(call) => call(py),
+                Job::Socket(job) => {
+                    let endpoint = &self.endpoints[job.request.route_id];
+                    realtime::start_socket(py, self, &endpoint.func, job.request, job.shared);
+                }
             }
         }
     }
@@ -256,7 +288,14 @@ impl Executor {
             .and_then(|done| done.is_truthy())
             .unwrap_or(false);
         if finished {
-            let response = task_outcome(py, &task, &request_id, &endpoint.name, self.debug);
+            let response = task_outcome(
+                py,
+                &task,
+                &request_id,
+                &endpoint.name,
+                self.debug,
+                &self.me(),
+            );
             let _ = job.reply.send(response);
             return;
         }
@@ -267,6 +306,7 @@ impl Executor {
             state: job.state,
             debug: self.debug,
             handler: endpoint.name.clone(),
+            executor: self.me(),
         };
         let attached = Bound::new(py, callback)
             .and_then(|callback| task.call_method1(intern!(py, "add_done_callback"), (callback,)));
@@ -282,6 +322,7 @@ fn task_outcome(
     request_id: &str,
     handler: &str,
     debug: bool,
+    executor: &Weak<Executor>,
 ) -> FerroResponse {
     let outcome = (|| -> PyResult<Result<Bound<'_, PyAny>, CallError>> {
         if task.call_method0(intern!(py, "cancelled"))?.is_truthy()? {
@@ -294,8 +335,16 @@ fn task_outcome(
         Ok(Ok(task.call_method0(intern!(py, "result"))?))
     })();
     match outcome {
-        Ok(Ok(value)) => convert::to_response(&value)
-            .unwrap_or_else(|err| errors::from_convert_error(py, err, request_id, handler, debug)),
+        Ok(Ok(value)) => {
+            let converted = if realtime::is_streaming(&value).unwrap_or(false) {
+                realtime::streaming_response(&value, executor.clone(), request_id, handler)
+            } else {
+                convert::to_response(&value)
+            };
+            converted.unwrap_or_else(|err| {
+                errors::from_convert_error(py, err, request_id, handler, debug)
+            })
+        }
         Ok(Err(error)) => errors::from_call_error(py, error, request_id, handler, debug),
         Err(err) => errors::from_call_error(py, CallError::Raised(err), request_id, handler, debug),
     }
@@ -332,6 +381,7 @@ pub(crate) struct TaskDone {
     state: Arc<CallState>,
     debug: bool,
     handler: String,
+    executor: Weak<Executor>,
 }
 
 #[pymethods]
@@ -344,7 +394,14 @@ impl TaskDone {
         if reply.is_closed() {
             return;
         }
-        let response = task_outcome(task.py(), task, &self.request_id, &self.handler, self.debug);
+        let response = task_outcome(
+            task.py(),
+            task,
+            &self.request_id,
+            &self.handler,
+            self.debug,
+            &self.executor,
+        );
         let _ = reply.send(response);
     }
 }
@@ -365,7 +422,29 @@ impl Bridge {
         )?
         .into_any();
         let _ = executor.drain.set(drain);
+        let _ = executor.me.set(Arc::downgrade(&executor));
         Ok(Self { executor })
+    }
+
+    /// Starts the handler of an accepted WebSocket connection; the engine sends its events to
+    /// the returned sink.
+    pub(crate) fn open_socket(
+        &self,
+        request: FerroRequest,
+        link: Arc<ferro_core::SocketLink>,
+    ) -> Arc<dyn ferro_core::SocketEvents> {
+        let handler = self.executor.endpoints[request.route_id].name.clone();
+        let shared = SocketShared::new(
+            link,
+            Arc::downgrade(&self.executor),
+            request.request_id.clone(),
+            handler,
+        );
+        self.executor.push(Job::Socket(Box::new(SocketJob {
+            request,
+            shared: shared.clone(),
+        })));
+        Arc::new(BridgeEvents(shared))
     }
 
     pub(crate) fn submit(&self, request: FerroRequest) -> PendingCall {
