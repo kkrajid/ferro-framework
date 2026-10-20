@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/ferro-logo-dark.png">
+    <img src="assets/ferro-logo.png" alt="Ferro" width="200">
+  </picture>
+</p>
+
 # Ferro documentation
 
 Ferro is a Python web framework with a Rust engine: you write models, routes and handlers in

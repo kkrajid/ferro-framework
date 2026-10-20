@@ -1,6 +1,18 @@
-# Ferro
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kkrajid/ferro-framework/main/docs/assets/ferro-logo-dark.png">
+    <img src="https://raw.githubusercontent.com/kkrajid/ferro-framework/main/docs/assets/ferro-logo.png" alt="Ferro" width="260">
+  </picture>
+</p>
 
-**A Python application framework with a Rust-native execution engine.**
+<p align="center"><strong>A Python application framework with a Rust-native execution engine.</strong></p>
+
+<p align="center">
+  <a href="https://pypi.org/project/ferro-framework/"><img src="https://img.shields.io/pypi/v/ferro-framework?include_prereleases" alt="PyPI"></a>
+  <a href="https://pypi.org/project/ferro-framework/"><img src="https://img.shields.io/pypi/pyversions/ferro-framework" alt="Python versions"></a>
+  <a href="https://github.com/kkrajid/ferro-framework/actions/workflows/ci.yml"><img src="https://github.com/kkrajid/ferro-framework/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue" alt="License"></a>
+</p>
 
 You write ordinary Python (models, routes, handlers). Ferro runs them on a Rust server:
 HTTP handling, routing, limits, JSON encoding and error handling all happen in Rust. You don't
