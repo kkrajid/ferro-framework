@@ -228,6 +228,14 @@ def test_every_worker_uses_the_same_database(tmp_path):
             readers = list(
                 pool.map(lambda _: httpx.get(f"{base}/visits", timeout=10).json(), range(40))
             )
+            # The kernel decides which worker accepts a connection (macOS can favour one for
+            # a while): keep reading until both have answered.
+            for _ in range(10):
+                if len(writers | {r["pid"] for r in readers}) >= 2:
+                    break
+                readers += pool.map(
+                    lambda _: httpx.get(f"{base}/visits", timeout=10).json(), range(30)
+                )
     finally:
         interrupt(process)
         _, err = process.communicate(timeout=60)
