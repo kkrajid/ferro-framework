@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import statistics
 import time
 
 import pytest
@@ -102,6 +101,11 @@ async def test_unknown_users_take_as_long_as_wrong_passwords(database):
         await authenticate(username, "wrong password")
         return time.perf_counter() - started
 
-    unknown = statistics.median([await timed("nobody") for _ in range(7)])
-    wrong = statistics.median([await timed("ann") for _ in range(7)])
+    # Interleaved samples, compared by their fastest run: a busy (CI) machine only ever adds
+    # time, so the minimum is the cost of the work itself and both paths see the same noise.
+    samples: dict[str, list[float]] = {"nobody": [], "ann": []}
+    for _ in range(9):
+        for username in samples:
+            samples[username].append(await timed(username))
+    unknown, wrong = min(samples["nobody"]), min(samples["ann"])
     assert abs(unknown - wrong) / max(unknown, wrong) < 0.3, (unknown, wrong)
