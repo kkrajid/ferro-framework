@@ -13,7 +13,7 @@ async-channel.workspace = true
 bytes.workspace = true
 rustls.workspace = true
 rustls-pki-types.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 tokio-postgres.workspace = true
 tokio-postgres-rustls.workspace = true
 tracing.workspace = true

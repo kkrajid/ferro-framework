@@ -190,6 +190,17 @@ def _check_reserved_paths(app: App, settings: Settings) -> None:
                 )
 
 
+def _warn_debug_build() -> None:
+    """An unoptimized native module (``maturin develop`` without ``--release``) is several times
+    slower; say so whenever it serves (Feature 020). Logged, so ``--log-format json`` stays JSON."""
+    if getattr(_ferro, "BUILD_PROFILE", "release") == "debug":
+        logging.getLogger("ferro.server").warning(
+            "Ferro's native module is an unoptimized debug build (`maturin develop`); it is "
+            "several times slower. Use `maturin develop --release` or the published wheel for "
+            "benchmarks and production."
+        )
+
+
 def _raise_shutdown(signum: int, frame: object) -> None:
     raise _Shutdown(signum)
 
@@ -226,6 +237,7 @@ def serve(
         shown_host = f"[{host}]" if ":" in host else host
         url = f"{settings.scheme}://{shown_host}:{port}"
         print(banner.format(url=url), file=sys.stderr, flush=True)
+    _warn_debug_build()
     try:
         try:
             while not runner.wait(_WAIT_SLICE):

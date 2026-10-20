@@ -25,6 +25,7 @@ on the ones above it. Source sections refer to [product-vision.md](product-visio
 | 017 | v0.5 release candidate: security audit, API freeze and stability policy, production deployment guide | §23 v0.5 | v0.5 | Implemented ([specs/017-release-candidate](../specs/017-release-candidate/)) |
 | 018 | Real-time: WebSockets, streaming responses and server-sent events, broadcast (memory, PostgreSQL LISTEN/NOTIFY) | §12, §14, §23 v1.0 (dashboards, SaaS) | next | Implemented ([specs/018-websockets-streaming](../specs/018-websockets-streaming/)) |
 | 019 | Pydantic integration: model-annotated request bodies, response models from return annotations, models in every JSON output | §5, §12, §23 v1.0 (REST apps) | next | Implemented ([specs/019-pydantic-integration](../specs/019-pydantic-integration/)) |
+| 020 | DB latency: debug-build warning, BEGIN pipelined with the first statement, checkout benchmark and profile | §20 | next | Implemented ([specs/020-db-latency](../specs/020-db-latency/)) |
 
 Reordered on 2026-10-10 at the user's request: PostgreSQL and migrations come before relations,
 so migrations are built and tested on both databases from the start (constitution VII).

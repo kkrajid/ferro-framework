@@ -28,6 +28,13 @@ use pyo3::prelude::*;
 #[pymodule]
 fn _ferro(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    // "debug" for unoptimized builds (`maturin develop`): several times slower (Feature 020).
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    m.add("BUILD_PROFILE", profile)?;
     m.add_class::<request::Request>()?;
     m.add_class::<request::QueryParams>()?;
     m.add_class::<request::Headers>()?;

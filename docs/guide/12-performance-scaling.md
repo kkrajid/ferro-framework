@@ -165,6 +165,10 @@ first (it goes a long way), then add caching, then consider splitting workloads.
 
 1. Test a production-like setup: `ferro run` (never `ferro dev`), PostgreSQL, the same number of
    processes, a separate load-generating machine.
+   **Use an optimized build.** The wheel from PyPI is one; a checkout built with
+   `maturin develop` is not: that debug build is 3–5 times slower (one ORM query 4.3 ms instead of
+   0.8 ms in our measurements) and `ferro run`/`ferro dev` print a warning when they find one.
+   Build from source with `maturin develop --release` before measuring.
 2. Use a load tool such as [oha](https://github.com/hatoo/oha), [k6](https://k6.io) or
    [Locust](https://locust.io):
 
@@ -178,6 +182,22 @@ first (it goes a long way), then add caching, then consider splitting workloads.
 5. Change one setting at a time (processes, workers, pool size) and compare. Throughput on a
    busy machine varies run to run; repeat runs and compare medians, or compare server CPU time
    per request.
+
+### Transactions on hot rows
+
+When many requests update the same rows (every checkout lowering one product's stock), they
+wait for each other's row locks, so throughput is about one over the time a transaction holds
+them. Each database round trip inside the transaction adds to that time:
+
+- Do the work that needs no lock (validation, reading other tables, computing totals) before
+  `transaction()` or before the first statement that locks.
+- Write each row once: compute values first and `create(...)` with them instead of creating and
+  then `save()`-ing again.
+- Ferro sends a transaction's `BEGIN` together with its first statement (PostgreSQL), and a
+  transaction that runs no statement costs no round trip.
+- Spread hot rows if the business allows it (stock per warehouse, counters per shard).
+
+`tests/benchmarks/run_020.py` measures the e-commerce checkout this way.
 
 ## Checklist for a slow endpoint
 

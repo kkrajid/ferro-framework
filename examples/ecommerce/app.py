@@ -172,10 +172,11 @@ async def own_order(request, order_id: int) -> Order:
 async def create_order(request):
     quantities = parse_items(await body(request))
     # One transaction: every line's stock goes down only while enough remains, or nothing does.
+    # Every database round trip here holds the stock rows' locks, so there are as few as
+    # possible: the order is inserted once with its total, after the stock is taken.
     async with transaction():
-        order = await Order.objects.create(customer=request.user)
         total = Decimal("0.00")
-        lines = []
+        taken_lines: list[tuple[Product, int]] = []
         for product_id, quantity in sorted(quantities.items()):
             found = await Product.objects.filter(pk=product_id, active=True).first()
             if found is None:
@@ -185,14 +186,15 @@ async def create_order(request):
             )
             if not taken:
                 raise HTTPException(409, f"Not enough stock for {found.name!r}")
-            lines.append(
-                await OrderLine.objects.create(
-                    order=order, product=found, quantity=quantity, unit_price=found.price
-                )
-            )
+            taken_lines.append((found, quantity))
             total += found.price * quantity
-        order.total = total
-        await order.save()
+        order = await Order.objects.create(customer=request.user, total=total)
+        lines = [
+            await OrderLine.objects.create(
+                order=order, product=product, quantity=quantity, unit_price=product.price
+            )
+            for product, quantity in taken_lines
+        ]
     return Response(order_json(order, lines), status=201)
 
 

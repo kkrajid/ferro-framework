@@ -194,3 +194,17 @@ def test_graceful_shutdown_completes_in_flight_requests(ferro_cli, tmp_path):
         thread.join(30)
     assert results == [200] * 50
     assert server.finish() == 0
+
+
+def test_debug_builds_are_announced(ferro_cli, tmp_path):
+    """Feature 020: an unoptimized native module says so when serving, a release one does not."""
+    from ferro import _ferro
+
+    (tmp_path / "app.py").write_text("from ferro import App\napp = App()\n")
+    server = ferro_cli("run", "--port", "0", cwd=tmp_path)
+    server.wait_for(r"serving app:app")
+    server.terminate()
+    server.finish()
+    debug = _ferro.BUILD_PROFILE == "debug"
+    warning = "native module is an unoptimized debug build"
+    assert (warning in server.output) is debug

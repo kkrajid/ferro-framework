@@ -133,6 +133,10 @@ uv run --python .venv pytest
 cargo test --workspace
 ```
 
+`maturin develop` makes an unoptimized debug build (quick to compile, 3–5 times slower; `ferro
+run` warns about it). For benchmarks or serving real traffic from a checkout, use
+`maturin develop --release`.
+
 ## How it is built
 
 The project follows spec-driven development with [Spec Kit](https://github.com/github/spec-kit):

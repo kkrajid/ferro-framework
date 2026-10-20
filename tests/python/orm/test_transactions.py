@@ -173,3 +173,39 @@ async def test_many_concurrent_transactions(database):
     await asyncio.gather(*(deposit(i) for i in range(50)))
     assert (await Account.objects.get(pk=ann.pk)).balance == 150
     assert await Entry.objects.count() == 50
+
+
+async def test_first_operations_of_a_transaction(database):
+    """Feature 020: on PostgreSQL BEGIN travels with the first statement; whatever comes first
+    (nothing, a failing statement, a savepoint, a batch, a lock) must behave as before."""
+    ann = await setup()
+
+    async with transaction():
+        pass  # nothing sent at all
+    with pytest.raises(Boom):
+        async with transaction():
+            raise Boom()
+
+    with pytest.raises(IntegrityError):
+        async with transaction():
+            await Account.objects.create(owner="ann")  # fails as the first statement
+            await Account.objects.create(owner="never")
+
+    async with transaction():
+        with pytest.raises(Boom):
+            async with transaction():  # a savepoint before any statement
+                await Account.objects.create(owner="rolled-back")
+                raise Boom()
+        await Account.objects.create(owner="kept")
+
+    with pytest.raises(Boom):
+        async with transaction():
+            await Entry.objects.bulk_create([Entry(account=ann, amount=1) for _ in range(2)])
+            raise Boom()
+
+    async with transaction():
+        locked = await Account.objects.select_for_update().get(pk=ann.pk)
+        await Account.objects.filter(pk=locked.pk).update(balance=F("balance") + 1)
+
+    assert await balances() == {"ann": 101, "kept": 0}
+    assert await Entry.objects.count() == 0

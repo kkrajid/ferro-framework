@@ -31,6 +31,44 @@ pub(crate) struct Connection {
     statements: HashMap<String, tokio_postgres::Statement>,
     /// A session opened a transaction that has not ended yet.
     in_transaction: bool,
+    /// The transaction's BEGIN has not been sent yet: it travels with the first statement
+    /// (Feature 020), and a transaction without statements never sends BEGIN or COMMIT.
+    begin_pending: bool,
+}
+
+impl Connection {
+    /// Whether the next statement must carry the pending BEGIN (and clears it).
+    fn take_begin(&mut self) -> bool {
+        std::mem::take(&mut self.begin_pending)
+    }
+
+    /// Sends a pending BEGIN on its own (before savepoints and batches).
+    async fn flush_begin(&mut self) -> Result<(), DbError> {
+        if self.take_begin() {
+            if let Err(err) = self.client.batch_execute("BEGIN").await {
+                self.in_transaction = false;
+                return Err(map_error(err));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Runs `statement` with a pending BEGIN pipelined in front of it: both requests leave in one
+/// round trip. BEGIN is Ferro's fixed statement, which fails only when the connection itself
+/// fails, and then the statement after it fails too. On an error the caller ends the
+/// transaction state.
+async fn with_begin_ref<T>(
+    client: &Client,
+    statement: impl std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+    begin: bool,
+) -> Result<T, DbError> {
+    if !begin {
+        return statement.await.map_err(map_error);
+    }
+    let (begun, result) = tokio::join!(client.batch_execute("BEGIN"), statement);
+    begun.map_err(map_error)?;
+    result.map_err(map_error)
 }
 
 pub(crate) async fn connect(shared: &Shared) -> Result<Connection, DbError> {
@@ -48,6 +86,7 @@ pub(crate) async fn connect(shared: &Shared) -> Result<Connection, DbError> {
         client,
         statements: HashMap::new(),
         in_transaction: false,
+        begin_pending: false,
     })
 }
 
@@ -129,11 +168,13 @@ async fn run_session(
         && active.in_transaction
     {
         active.in_transaction = false;
-        active
-            .client
-            .batch_execute("ROLLBACK")
-            .await
-            .map_err(map_error)?;
+        if !active.take_begin() {
+            active
+                .client
+                .batch_execute("ROLLBACK")
+                .await
+                .map_err(map_error)?;
+        }
     }
     Ok(Outcome::Affected(0))
 }
@@ -174,11 +215,16 @@ async fn query(connection: &mut Connection, statement: &Statement) -> JobResult 
         .await
         .map_err(map_error)?;
     let values = params(statement);
-    let rows = connection
-        .client
-        .query(&prepared, &refs(&values))
+    let values = refs(&values);
+    let begin = connection.take_begin();
+    let client = &connection.client;
+    let rows = with_begin_ref(client, client.query(&prepared, &values), begin)
         .await
-        .map_err(map_error)?;
+        .inspect_err(|_| {
+            if begin {
+                connection.in_transaction = false;
+            }
+        })?;
     let columns = prepared
         .columns()
         .iter()
@@ -200,18 +246,19 @@ async fn execute(connection: &mut Connection, job: Job) -> JobResult {
                 .await
                 .map_err(map_error)?;
             let values = params(&statement);
-            connection
-                .client
-                .execute(&prepared, &refs(&values))
+            let values = refs(&values);
+            let begin = connection.take_begin();
+            let client = &connection.client;
+            with_begin_ref(client, client.execute(&prepared, &values), begin)
                 .await
                 .map(Outcome::Affected)
-                .map_err(map_error)
         }
         Job::Batch {
             statements,
             returning,
         } => {
             if connection.in_transaction {
+                connection.flush_begin().await?;
                 // Inside a session's transaction: a savepoint keeps the batch atomic.
                 let client = &connection.client;
                 client
@@ -253,6 +300,22 @@ async fn execute(connection: &mut Connection, job: Job) -> JobResult {
                 return Err(DbError::Operational {
                     message: "a transaction is already open on this connection".into(),
                 });
+            }
+            match command {
+                // Sent later, with the first statement.
+                TransactionCommand::Begin => {
+                    connection.in_transaction = true;
+                    connection.begin_pending = true;
+                    return Ok(Outcome::Affected(0));
+                }
+                // Nothing was sent: there is nothing to commit or roll back.
+                TransactionCommand::Commit | TransactionCommand::Rollback
+                    if connection.take_begin() =>
+                {
+                    connection.in_transaction = false;
+                    return Ok(Outcome::Affected(0));
+                }
+                _ => connection.flush_begin().await?,
             }
             let result = connection
                 .client

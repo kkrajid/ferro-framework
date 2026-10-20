@@ -4,6 +4,20 @@ All notable changes to Ferro. The format follows [Keep a Changelog](https://keep
 and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 rules in
 [docs/stability.md](docs/stability.md).
 
+## [Unreleased]
+
+### Added
+
+- `ferro run` and `ferro dev` warn when the native module is an unoptimized debug build
+  (`maturin develop`), which is 3–5 times slower; the performance guide explains how to measure.
+- `tests/benchmarks/run_020.py`: the e-commerce checkout under load on PostgreSQL.
+
+### Changed
+
+- PostgreSQL transactions send `BEGIN` together with their first statement (one round trip
+  less), and a transaction that runs no statement sends nothing.
+- The e-commerce example inserts an order once, with its total.
+
 ## [0.5.0rc2] — 2026-10-20
 
 Second release candidate; the first one published to PyPI (0.5.0rc1 was never uploaded, so
