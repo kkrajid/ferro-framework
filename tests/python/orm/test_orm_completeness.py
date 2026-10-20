@@ -311,8 +311,8 @@ async def test_raw_sql(database):
         "SELECT title, pages FROM t22_novel WHERE pages > %s ORDER BY title", [200]
     )
     assert rows == [{"title": "Blue Road", "pages": 255}, {"title": "Rain Song", "pages": 320}]
-    like = await db.fetch("SELECT name FROM t22_writer WHERE name LIKE %s ORDER BY name", ["%o%"])
-    assert [r["name"] for r in like] == ["Cid Moe", "bob ray"]
+    like = await db.fetch("SELECT name FROM t22_writer WHERE name LIKE %s", ["%o%"])
+    assert sorted(r["name"] for r in like) == ["Cid Moe", "bob ray"]  # collations sort differently
     literal = await db.fetch("SELECT name FROM t22_writer WHERE name LIKE 'A%%'")
     assert literal == [{"name": "Ann Lee"}]
     writers = await Writer.objects.raw(
