@@ -2,8 +2,7 @@ use std::sync::atomic::Ordering;
 
 use crossbeam_channel::Receiver;
 use ferro_database::{
-    DbError, IntegrityKind, Job, JobResult, Outcome, Rows, SessionReceiver, Statement,
-    TransactionCommand, Value, skip,
+    DbError, IntegrityKind, Job, JobResult, Outcome, Rows, SessionReceiver, Statement, Value, skip,
 };
 use rusqlite::types::{ToSql, ToSqlOutput, ValueRef};
 use rusqlite::{Connection, TransactionBehavior, params_from_iter};
@@ -158,7 +157,7 @@ fn execute(connection: &mut Connection, job: Job) -> JobResult {
         }
         Job::Schema(statements) => run_schema(connection, &statements),
         Job::Transaction(command) => {
-            if command == TransactionCommand::Begin && !connection.is_autocommit() {
+            if command.is_begin() && !connection.is_autocommit() {
                 return Err(DbError::Operational {
                     message: "a transaction is already open on this connection".into(),
                 });

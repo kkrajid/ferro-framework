@@ -138,6 +138,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     create.add_argument("target", nargs="?", default=DEFAULT_TARGET, help="module:attribute")
     create.add_argument("--database-url", dest="database_url", metavar="URL")
+    reset = database_commands.add_parser(
+        "sequence-reset",
+        help="move PostgreSQL primary key sequences past rows inserted with explicit ids",
+    )
+    reset.add_argument("target", nargs="?", default=DEFAULT_TARGET, help="module:attribute")
+    reset.add_argument("--database-url", dest="database_url", metavar="URL")
     client = database_commands.add_parser("shell", help="open the database's own client")
     client.add_argument("target", nargs="?", default=DEFAULT_TARGET, help="module:attribute")
     client.add_argument("--database-url", dest="database_url", metavar="URL")
@@ -534,6 +540,32 @@ def _create_tables(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _sequence_reset(args: argparse.Namespace) -> int:
+    from ferro import db
+
+    app = load_app(args.target)
+    settings = resolve(cli={"database_url": args.database_url}, app=app._settings, mode="run")
+    if settings.database_url is None:
+        raise ConfigurationError(
+            "no database URL; pass --database-url, set FERRO_DATABASE_URL "
+            "or use App(database_url=...)"
+        )
+
+    async def run() -> tuple[list[str], list[str]]:
+        await db.connect(settings.database_url)
+        try:
+            return await db.reset_sequences()
+        finally:
+            await db.disconnect()
+
+    checked, moved = asyncio.run(run())
+    if not checked:
+        print("nothing to do (no PostgreSQL sequences)")
+    for table in checked:
+        print(f"{'moved' if table in moved else 'ok':<8} {table}")
+    return EXIT_OK
+
+
 def _new(args: argparse.Namespace) -> int:
     from ferro.project import create_project
 
@@ -629,6 +661,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _shell(args)
         if args.command == "db" and args.db_command == "shell":
             return _db_shell(args)
+        if args.command == "db" and args.db_command == "sequence-reset":
+            return _sequence_reset(args)
         if args.command == "db":
             return _create_tables(args)
         if args.command == "makemigrations":

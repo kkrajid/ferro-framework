@@ -99,6 +99,12 @@ Lists migration files and whether each is applied.
 
 Creates missing tables straight from the models, without migrations (quick experiments only).
 
+### `ferro db sequence-reset [target]`
+
+PostgreSQL: moves each model's primary key sequence past the highest key in its table (after
+loading rows with explicit ids through other tools). Never moves a sequence back; prints `moved`
+or `ok` per table.
+
 ### `ferro db shell [target]`
 
 Opens the database's own client (`sqlite3` or `psql`, which must be installed) connected to the

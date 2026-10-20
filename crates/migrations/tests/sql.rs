@@ -154,6 +154,8 @@ fn postgres_alter_statements() {
         vec![
             r#"ALTER TABLE "product" RENAME COLUMN "name" TO "title""#,
             r#"ALTER INDEX "product_name_idx" RENAME TO "product_title_idx""#,
+            // A text index has a pattern index (Feature 021); older ones may not.
+            r#"ALTER INDEX IF EXISTS "product_name_idx_like" RENAME TO "product_title_idx_like""#,
         ]
     );
     assert_eq!(
@@ -167,6 +169,7 @@ fn postgres_alter_statements() {
         vec![
             r#"ALTER TABLE "product" RENAME TO "item""#,
             r#"ALTER INDEX "product_name_idx" RENAME TO "item_name_idx""#,
+            r#"ALTER INDEX IF EXISTS "product_name_idx_like" RENAME TO "item_name_idx_like""#,
             r#"ALTER TABLE "item" RENAME CONSTRAINT "product_sku_key" TO "item_sku_key""#,
         ]
     );
@@ -178,7 +181,10 @@ fn postgres_alter_statements() {
                 name: "product_name_idx".into()
             }
         ),
-        vec![r#"DROP INDEX "product_name_idx""#]
+        vec![
+            r#"DROP INDEX IF EXISTS "product_name_idx_like""#,
+            r#"DROP INDEX "product_name_idx""#,
+        ]
     );
 }
 

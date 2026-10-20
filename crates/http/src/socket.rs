@@ -67,12 +67,18 @@ pub(crate) async fn run(
             command = link.next_command() => match command {
                 SocketCommand::Send(message) => {
                     let size = message.len();
-                    let written = match message {
-                        SocketMessage::Text(text) => writer.text(text).await,
-                        SocketMessage::Binary(bytes) => writer.binary(bytes).await,
+                    let write = async {
+                        match message {
+                            SocketMessage::Text(text) => writer.text(text).await,
+                            SocketMessage::Binary(bytes) => writer.binary(bytes).await,
+                        }
                     };
-                    if written.is_err() {
-                        break (close_code::ABNORMAL, "connection lost".to_string());
+                    // A client that stops reading must not hold the connection (and shutdown,
+                    // pings, the application's close) for as long as TCP keeps trying.
+                    match tokio::time::timeout(SILENCE_LIMIT, write).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => break (close_code::ABNORMAL, "connection lost".to_string()),
+                        Err(_) => break (close_code::ABNORMAL, "client stopped reading".to_string()),
                     }
                     if link.sent(size) {
                         events.event(SocketEvent::Drained);
@@ -89,12 +95,12 @@ pub(crate) async fn run(
             } => match frame {
                 Some(Ok(AggregatedMessage::Text(text))) => {
                     last_seen = Instant::now();
-                    link.received();
+                    link.received(text.len());
                     events.event(SocketEvent::Message(SocketMessage::Text(text.to_string())));
                 }
                 Some(Ok(AggregatedMessage::Binary(bytes))) => {
                     last_seen = Instant::now();
-                    link.received();
+                    link.received(bytes.len());
                     events.event(SocketEvent::Message(SocketMessage::Binary(bytes)));
                 }
                 Some(Ok(AggregatedMessage::Ping(payload))) => {

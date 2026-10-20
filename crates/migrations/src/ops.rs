@@ -96,4 +96,35 @@ pub enum Operation {
         table: String,
         name: String,
     },
+    /// Hand-written SQL, one statement per entry (Feature 021). Leaves the recorded schema
+    /// unchanged; reversible only with `reverse_sql`.
+    RunSql {
+        sql: Vec<String>,
+        reverse_sql: Option<Vec<String>>,
+    },
+    /// Python code run by the migration runner; no SQL here. Reversible with a backward function.
+    RunPython {
+        reversible: bool,
+    },
+    /// `CREATE EXTENSION IF NOT EXISTS` on PostgreSQL; nothing on SQLite.
+    CreateExtension {
+        name: String,
+    },
+    /// `DROP EXTENSION IF EXISTS` on PostgreSQL; nothing on SQLite.
+    DropExtension {
+        name: String,
+    },
+}
+
+impl Operation {
+    /// Whether the operation leaves the recorded schema unchanged (data and extension steps).
+    pub fn keeps_schema(&self) -> bool {
+        matches!(
+            self,
+            Self::RunSql { .. }
+                | Self::RunPython { .. }
+                | Self::CreateExtension { .. }
+                | Self::DropExtension { .. }
+        )
+    }
 }

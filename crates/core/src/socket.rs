@@ -17,6 +17,9 @@ use tokio::sync::Notify;
 pub const OUTBOUND_LIMIT: usize = 1 << 20;
 /// Messages from the client waiting for the application before the engine stops reading.
 pub const INBOUND_LIMIT: usize = 32;
+/// Bytes of received messages the application has not taken yet before the engine stops
+/// reading (one message of any allowed size is always accepted).
+pub const INBOUND_BYTES: usize = 1 << 20;
 
 /// Close codes used by Ferro (RFC 6455 §7.4).
 pub mod close_code {
@@ -94,6 +97,7 @@ pub struct SocketLink {
     queued_bytes: AtomicUsize,
     waiting_for_drain: AtomicBool,
     unconsumed: AtomicUsize,
+    unconsumed_bytes: AtomicUsize,
     consumed: Notify,
     closing: AtomicBool,
     closed: AtomicBool,
@@ -141,20 +145,10 @@ impl SocketLink {
         });
     }
 
-    /// The application took one message delivered by [`SocketEvent::Message`].
-    pub fn consumed(&self) {
-        let mut current = self.unconsumed.load(Ordering::Acquire);
-        while current > 0 {
-            match self.unconsumed.compare_exchange_weak(
-                current,
-                current - 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
+    /// The application took one message of `bytes` delivered by [`SocketEvent::Message`].
+    pub fn consumed(&self, bytes: usize) {
+        saturating_sub(&self.unconsumed, 1);
+        saturating_sub(&self.unconsumed_bytes, bytes);
         self.consumed.notify_one();
     }
 
@@ -189,15 +183,23 @@ impl SocketLink {
         left <= OUTBOUND_LIMIT / 2 && self.waiting_for_drain.swap(false, Ordering::AcqRel)
     }
 
-    /// A message was handed to the application.
-    pub fn received(&self) {
+    /// A message of `bytes` was handed to the application.
+    pub fn received(&self, bytes: usize) {
         self.unconsumed.fetch_add(1, Ordering::AcqRel);
+        self.unconsumed_bytes.fetch_add(bytes, Ordering::AcqRel);
     }
 
-    /// Waits while [`INBOUND_LIMIT`] messages wait for the application.
+    /// Waits while [`INBOUND_LIMIT`] messages or [`INBOUND_BYTES`] wait for the application, so
+    /// a client cannot fill memory with messages a handler does not read.
     pub async fn room_for_inbound(&self) {
-        while self.unconsumed.load(Ordering::Acquire) >= INBOUND_LIMIT {
-            self.consumed.notified().await;
+        loop {
+            let notified = self.consumed.notified();
+            if self.unconsumed.load(Ordering::Acquire) < INBOUND_LIMIT
+                && self.unconsumed_bytes.load(Ordering::Acquire) < INBOUND_BYTES
+            {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -209,6 +211,21 @@ impl SocketLink {
     /// Bytes queued for the client (for tests and metrics).
     pub fn queued_bytes(&self) -> usize {
         self.queued_bytes.load(Ordering::Acquire)
+    }
+}
+
+fn saturating_sub(counter: &AtomicUsize, amount: usize) {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        match counter.compare_exchange_weak(
+            current,
+            current.saturating_sub(amount),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
     }
 }
 

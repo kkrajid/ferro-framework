@@ -1279,6 +1279,27 @@ pub fn delete(dialect: &dyn Dialect, query: &Query) -> Result<Statement, OrmErro
     Ok(sql.finish())
 }
 
+/// PostgreSQL: moves the automatic primary key's sequence up to the table's highest key when
+/// it is behind (after rows were inserted with explicit keys), never down (Feature 021).
+/// `None` for SQLite (AUTOINCREMENT already continues after the highest key) and for models
+/// without an automatic key.
+pub fn sync_sequence(dialect: &dyn Dialect, meta: &ModelMeta) -> Option<Statement> {
+    let pk = meta.pk_field();
+    if dialect.name() != "postgresql" || !pk.auto {
+        return None;
+    }
+    let table = dialect.quote(&meta.table);
+    Some(Statement::new(
+        format!(
+            "SELECT setval(q.s, q.m) FROM (SELECT pg_get_serial_sequence($1, $2)::regclass AS s, \
+             (SELECT MAX({}) FROM {table}) AS m) AS q \
+             WHERE q.s IS NOT NULL AND q.m > COALESCE(pg_sequence_last_value(q.s), 0)",
+            dialect.quote(&pk.column)
+        ),
+        vec![Value::Text(table), Value::Text(pk.column.clone())],
+    ))
+}
+
 pub fn insert(
     dialect: &dyn Dialect,
     meta: &ModelMeta,

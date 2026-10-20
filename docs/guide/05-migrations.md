@@ -111,10 +111,52 @@ ferro db create-tables                       # create missing tables without mig
 `ferro db create-tables` and `ferro.db.create_tables()` (used by tests) create tables directly
 from the models; never mix them with migrations on the same database.
 
+## Data migrations and raw SQL
+
+Write these by hand in a migration made with `ferro makemigrations --empty --name ...`:
+
+```python
+from ferro.migrations import Migration, ops
+
+from shop.models import Product
+
+
+async def fill_slugs():
+    async for product in Product.objects.filter(slug="").iterator():
+        product.slug = product.name.lower().replace(" ", "-")
+        await product.save()
+
+
+migration = Migration(
+    dependencies=["0007_add_product_slug"],
+    operations=[
+        ops.CreateExtension("pg_trgm"),
+        ops.RunSQL(
+            "CREATE INDEX product_name_trgm ON product USING gin (name gin_trgm_ops)",
+            reverse_sql="DROP INDEX product_name_trgm",
+        ),
+        ops.RunPython(fill_slugs, backward=ops.RunPython.noop),
+    ],
+)
+```
+
+- `ops.RunSQL(sql, reverse_sql=None)`: one statement per string, a list for several.
+  Without `reverse_sql` the migration cannot be rolled back (`reverse_sql=[]` when there is
+  nothing to undo).
+- `ops.RunPython(forward, backward=None)`: functions without arguments, `async` or not, using
+  the ORM. They run inside the migration's transaction, together with the history row: an
+  exception rolls back everything. `ops.RunPython.noop` is a backward step that does nothing.
+- `ops.CreateExtension(name)` / `ops.DropExtension(name)`: PostgreSQL extensions (`IF NOT
+  EXISTS` / `IF EXISTS`); nothing on SQLite. Creating one needs a suitably privileged role.
+- A migration with `RunPython` may contain only `RunPython`, `RunSQL` and extension operations
+  (schema changes go in their own migration, so SQLite can rebuild tables safely).
+- RunPython code uses your current models; when a later migration changes them, an old data
+  migration that no longer matches can be emptied (`operations=[]`) once every database ran it.
+- None of these change the schema Ferro records, so `makemigrations` ignores what they do:
+  never create or alter model tables and columns with `RunSQL`.
+
 ## Limits
 
-- No data migrations (Python code inside migrations) yet: transform data with a script run
-  between two migrations, or in SQL through your database client (`ferro db shell`).
 - Migrations are linear (one chain); after merging two branches that both added a migration,
   roll back and delete one of them (where it was applied), then run `ferro makemigrations`
   again.

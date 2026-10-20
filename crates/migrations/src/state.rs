@@ -220,6 +220,21 @@ impl SchemaState {
                     )));
                 }
             }
+            Operation::RunSql { sql, .. } => {
+                if sql.iter().any(|s| s.trim().is_empty()) {
+                    return Err(error("RunSQL statements must not be empty"));
+                }
+            }
+            Operation::RunPython { .. } => {}
+            Operation::CreateExtension { name } | Operation::DropExtension { name } => {
+                if name.is_empty()
+                    || !name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    return Err(error(format!("invalid extension name '{name}'")));
+                }
+            }
         }
         Ok(())
     }

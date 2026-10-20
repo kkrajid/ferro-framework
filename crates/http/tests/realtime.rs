@@ -24,6 +24,20 @@ struct Record {
     closed: Mutex<Vec<(u16, String)>>,
     source_dropped: AtomicBool,
     chunks_made: AtomicUsize,
+    hoarded: AtomicUsize,
+}
+
+/// A handler that never takes the messages it is given (they pile up unconsumed).
+struct Hoard {
+    record: Arc<Record>,
+}
+
+impl SocketEvents for Hoard {
+    fn event(&self, event: SocketEvent) {
+        if let SocketEvent::Message(_) = event {
+            self.record.hoarded.fetch_add(1, Ordering::SeqCst);
+        }
+    }
 }
 
 struct App {
@@ -69,7 +83,7 @@ impl SocketEvents for Echo {
     fn event(&self, event: SocketEvent) {
         match event {
             SocketEvent::Message(SocketMessage::Text(text)) => {
-                self.link.consumed();
+                self.link.consumed(text.len());
                 if text == "close please" {
                     self.link.close(4000, "bye");
                 } else {
@@ -77,7 +91,7 @@ impl SocketEvents for Echo {
                 }
             }
             SocketEvent::Message(SocketMessage::Binary(bytes)) => {
-                self.link.consumed();
+                self.link.consumed(bytes.len());
                 let _ = self.link.send(SocketMessage::Binary(bytes));
             }
             SocketEvent::Closed { code, reason } => {
@@ -107,7 +121,12 @@ impl Dispatcher for App {
         })
     }
 
-    fn open_socket(&self, _request: FerroRequest, link: Arc<SocketLink>) -> Arc<dyn SocketEvents> {
+    fn open_socket(&self, request: FerroRequest, link: Arc<SocketLink>) -> Arc<dyn SocketEvents> {
+        if request.query_string == "hoard" {
+            return Arc::new(Hoard {
+                record: self.record.clone(),
+            });
+        }
         Arc::new(Echo {
             link,
             record: self.record.clone(),
@@ -234,6 +253,29 @@ fn oversized_messages_close_with_1009() {
         !record.closed.lock().unwrap().is_empty()
     });
     assert_eq!(record.closed.lock().unwrap()[0].0, 1009);
+    stop(server);
+}
+
+#[test]
+fn unread_messages_are_bounded_in_bytes() {
+    // 400 KiB messages to a handler that never reads them: the engine stops reading once
+    // 1 MiB waits (3 messages), long before the 32-message limit.
+    let (server, record) = serve(Settings::default(), None);
+    let client = ws_connect(server.local_addr(), "/ws?hoard", "").unwrap();
+    let mut writer = client.stream.try_clone().unwrap();
+    let sender = std::thread::spawn(move || {
+        let mut sent = WsClient {
+            stream: writer.try_clone().unwrap(),
+        };
+        for _ in 0..8 {
+            sent.send(OP_BINARY, &vec![7u8; 400 * 1024]);
+        }
+        let _ = writer.flush();
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(record.hoarded.load(Ordering::SeqCst), 3);
+    drop(sender);
+    client.stream.shutdown(std::net::Shutdown::Both).ok();
     stop(server);
 }
 

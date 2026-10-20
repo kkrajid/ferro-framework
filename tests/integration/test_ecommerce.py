@@ -171,6 +171,44 @@ def shopping_journey(base: str) -> None:
     assert httpx.get(f"{base}/api/products/last-phones").json()["stock"] == 0
 
 
+def concurrent_mixed_orders(base: str) -> None:
+    """Orders for two products listed in opposite orders, some cancelled, all at once: no
+    deadlock or server error, and stock adds up exactly (Feature 020)."""
+    products = {p["slug"]: p for p in httpx.get(f"{base}/api/products").json()["results"]}
+    first, second = products["phone-x"], products["rust-book"]
+    slugs = ("phone-x", "rust-book")
+    before = {s: httpx.get(f"{base}/api/products/{s}").json()["stock"] for s in slugs}
+    clients = [customer(base, f"mixed{i}") for i in range(16)]
+
+    def shop(i: int) -> tuple[int, int | None]:
+        items = [
+            {"product_id": first["id"], "quantity": 1},
+            {"product_id": second["id"], "quantity": 2},
+        ]
+        if i % 2:
+            items.reverse()
+        placed = clients[i].post("/api/orders", json={"items": items})
+        if placed.status_code == 201 and i % 4 == 0:
+            cancelled = clients[i].post(f"/api/orders/{placed.json()['id']}/cancel")
+            return placed.status_code, cancelled.status_code
+        return placed.status_code, None
+
+    try:
+        with ThreadPoolExecutor(16) as pool:
+            results = list(pool.map(shop, range(16)))
+    finally:
+        for client in clients:
+            client.close()
+    assert {placed for placed, _ in results} <= {201, 409}, results
+    assert all(cancelled in (None, 200) for _, cancelled in results), results
+    kept = sum(1 for placed, cancelled in results if placed == 201 and cancelled is None)
+    after = {s: httpx.get(f"{base}/api/products/{s}").json()["stock"] for s in slugs}
+    assert after == {
+        "phone-x": before["phone-x"] - kept,
+        "rust-book": before["rust-book"] - 2 * kept,
+    }
+
+
 def admin_back_office(base: str) -> None:
     with httpx.Client(base_url=base, timeout=30, follow_redirects=True) as staff:
         page = staff.post(
@@ -200,6 +238,7 @@ def definition_of_done(project: Path, url: str) -> None:
     shop = Shop(project, env)
     try:
         shopping_journey(shop.base)
+        concurrent_mixed_orders(shop.base)
         admin_back_office(shop.base)
     finally:
         code = shop.stop()

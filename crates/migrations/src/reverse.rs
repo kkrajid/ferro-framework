@@ -112,6 +112,32 @@ pub fn reverse(
                 unique: index.unique,
             }]
         }
+        Operation::RunSql { sql, reverse_sql } => match reverse_sql {
+            Some(reverse_sql) => vec![Operation::RunSql {
+                sql: reverse_sql.clone(),
+                reverse_sql: Some(sql.clone()),
+            }],
+            None => {
+                return Err(error(
+                    "a RunSQL operation without reverse_sql cannot be reversed (give \
+                     reverse_sql=..., or reverse_sql=[] when there is nothing to undo)",
+                ));
+            }
+        },
+        Operation::RunPython { reversible } => {
+            if !reversible {
+                return Err(error(
+                    "a RunPython operation without a backward function cannot be reversed",
+                ));
+            }
+            vec![operation.clone()]
+        }
+        Operation::CreateExtension { name } => {
+            vec![Operation::DropExtension { name: name.clone() }]
+        }
+        Operation::DropExtension { name } => {
+            vec![Operation::CreateExtension { name: name.clone() }]
+        }
     })
 }
 

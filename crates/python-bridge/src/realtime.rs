@@ -369,7 +369,7 @@ impl SocketShared {
                     && !is_done(future.bind(py))
                 {
                     drop(inner);
-                    self.link.consumed();
+                    self.link.consumed(message.len());
                     let value = message_value(py, message);
                     if let Ok(value) = value {
                         let _ = future
@@ -553,7 +553,7 @@ impl Socket {
         let mut inner = lock(&self.shared.inner);
         if let Some(message) = inner.buffer.pop_front() {
             drop(inner);
-            self.shared.link.consumed();
+            self.shared.link.consumed(message.len());
             let value = message_value(py, message)?;
             return Ok(Bound::new(py, Ready::new(value))?.into_any());
         }

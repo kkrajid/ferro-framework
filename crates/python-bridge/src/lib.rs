@@ -61,6 +61,7 @@ fn _ferro(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(orm::update_instance, m)?)?;
     m.add_function(wrap_pyfunction!(orm::delete_instance, m)?)?;
     m.add_function(wrap_pyfunction!(orm::bulk_insert, m)?)?;
+    m.add_function(wrap_pyfunction!(orm::reset_sequences, m)?)?;
     m.add_function(wrap_pyfunction!(orm::bulk_update, m)?)?;
     m.add_function(wrap_pyfunction!(orm::list_tables, m)?)?;
     m.add_function(wrap_pyfunction!(orm::create_tables, m)?)?;

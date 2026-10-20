@@ -3,14 +3,15 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use ferro_database::DbError;
 use tokio_postgres::config::{Host, SslMode};
 
 const DEFAULT_POOL_SIZE: usize = 10;
 const DEFAULT_QUEUE_SIZE: usize = 1024;
-const SUPPORTED: &str =
-    "sslmode, sslrootcert, pool_size, queue_size, connect_timeout, options, application_name";
+const SUPPORTED: &str = "sslmode, sslrootcert, pool_size, queue_size, connect_timeout, \
+                         options, application_name, max_lifetime, max_idle";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsMode {
@@ -26,6 +27,10 @@ pub struct PgConfig {
     pub queue_size: usize,
     pub tls: TlsMode,
     pub root_cert: Option<PathBuf>,
+    /// A pooled connection older than this is replaced before its next job (Feature 021).
+    pub max_lifetime: Option<Duration>,
+    /// A pooled connection unused for this long is replaced before its next job.
+    pub max_idle: Option<Duration>,
     pub(crate) driver: tokio_postgres::Config,
 }
 
@@ -36,6 +41,8 @@ impl fmt::Debug for PgConfig {
             .field("pool_size", &self.pool_size)
             .field("queue_size", &self.queue_size)
             .field("tls", &self.tls)
+            .field("max_lifetime", &self.max_lifetime)
+            .field("max_idle", &self.max_idle)
             .finish_non_exhaustive()
     }
 }
@@ -44,6 +51,16 @@ fn config_error(message: impl Into<String>) -> DbError {
     DbError::Other {
         message: message.into(),
     }
+}
+
+/// Seconds (a positive number, fractions allowed) for `max_lifetime` / `max_idle`.
+fn seconds(key: &str, value: &str) -> Result<Duration, DbError> {
+    value
+        .parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s > 0.0 && *s <= 1e9)
+        .map(Duration::from_secs_f64)
+        .ok_or_else(|| config_error(format!("invalid {key} '{value}': expected seconds above 0")))
 }
 
 fn percent_decode(text: &str) -> String {
@@ -78,6 +95,8 @@ impl PgConfig {
         let mut queue_size = DEFAULT_QUEUE_SIZE;
         let mut tls = TlsMode::Prefer;
         let mut root_cert = None;
+        let mut max_lifetime = None;
+        let mut max_idle = None;
         let mut passthrough = Vec::new();
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -117,6 +136,8 @@ impl PgConfig {
                     };
                 }
                 "sslrootcert" => root_cert = Some(PathBuf::from(value)),
+                "max_lifetime" => max_lifetime = Some(seconds(key, &value)?),
+                "max_idle" => max_idle = Some(seconds(key, &value)?),
                 "connect_timeout" | "options" | "application_name" => passthrough.push(pair),
                 other => {
                     return Err(config_error(format!(
@@ -143,6 +164,8 @@ impl PgConfig {
             queue_size,
             tls,
             root_cert,
+            max_lifetime,
+            max_idle,
             driver,
         })
     }

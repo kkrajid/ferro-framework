@@ -3,7 +3,10 @@
 
 use ferro_database::{Statement, Value};
 use ferro_orm::compile::Dialect;
-use ferro_orm::ddl::{column_sql, create_composite_index_sql, create_table_sql};
+use ferro_orm::ddl::{
+    column_sql, create_composite_index_sql, create_table_sql, is_text, pattern_index_name,
+    pattern_index_sql,
+};
 
 use crate::ops::{ColumnDef, Operation};
 use crate::state::{IndexDef, SchemaState, TableState};
@@ -88,6 +91,36 @@ fn index_sql(dialect: &dyn Dialect, table: &str, index: &IndexDef) -> String {
     create_composite_index_sql(dialect, table, &index.name, &index.columns, index.unique)
 }
 
+/// The column of a single-column, non-unique index: the kind that gets a PostgreSQL pattern
+/// index next to it.
+fn single_column(columns: &[String], unique: bool) -> Option<&str> {
+    match columns {
+        [column] if !unique => Some(column),
+        _ => None,
+    }
+}
+
+/// `CREATE INDEX ... text_pattern_ops` for `index` when its column holds text (PostgreSQL).
+fn pattern_index(
+    dialect: &dyn Dialect,
+    state: &TableState,
+    table: &str,
+    name: &str,
+    columns: &[String],
+    unique: bool,
+) -> Option<Statement> {
+    let column = single_column(columns, unique)?;
+    let kind = &state.column(column)?.kind;
+    pattern_index_sql(dialect, table, name, column, kind).map(plain)
+}
+
+fn drop_pattern_index(dialect: &dyn Dialect, name: &str) -> Statement {
+    plain(format!(
+        "DROP INDEX IF EXISTS {}",
+        dialect.quote(&pattern_index_name(name))
+    ))
+}
+
 /// Indexes whose names changed between two states of a table (renames keep Ferro's naming).
 fn renamed_indexes(
     dialect: &dyn Dialect,
@@ -107,6 +140,17 @@ fn renamed_indexes(
                 dialect.quote(&old.name),
                 dialect.quote(&new.name)
             )));
+            // Text indexes have a pattern index (none when created before Feature 021).
+            let text = single_column(&old.columns, old.unique)
+                .and_then(|column| before.column(column))
+                .is_some_and(|column| is_text(&column.kind));
+            if text {
+                statements.push(plain(format!(
+                    "ALTER INDEX IF EXISTS {} RENAME TO {}",
+                    dialect.quote(&pattern_index_name(&old.name)),
+                    dialect.quote(&pattern_index_name(&new.name))
+                )));
+            }
         } else {
             statements.push(plain(format!("DROP INDEX {}", dialect.quote(&old.name))));
             statements.push(plain(index_sql(dialect, table, new)));
@@ -192,10 +236,28 @@ pub fn compile(
             columns,
             name,
             unique,
-        } => vec![plain(create_composite_index_sql(
-            dialect, table, name, columns, *unique,
-        ))],
-        Operation::DropIndex { name, .. } => vec![plain(format!("DROP INDEX {}", q(name)))],
+        } => {
+            let mut statements = vec![plain(create_composite_index_sql(
+                dialect, table, name, columns, *unique,
+            ))];
+            statements.extend(pattern_index(
+                dialect,
+                before.existing(table)?,
+                table,
+                name,
+                columns,
+                *unique,
+            ));
+            statements
+        }
+        Operation::DropIndex { name, .. } => {
+            let mut statements = Vec::new();
+            if postgres {
+                statements.push(drop_pattern_index(dialect, name));
+            }
+            statements.push(plain(format!("DROP INDEX {}", q(name))));
+            statements
+        }
         Operation::AddColumn {
             table,
             column,
@@ -288,12 +350,39 @@ pub fn compile(
                         q(table)
                     )));
                 }
+                // A pattern index only fits text: drop it before the type leaves text, create
+                // it once the type becomes text (varchar <-> text keeps it).
+                let pattern_change = is_text(&old.kind) != is_text(&column.kind);
+                let indexes: Vec<&IndexDef> = before
+                    .existing(table)?
+                    .indexes
+                    .iter()
+                    .filter(|i| single_column(&i.columns, i.unique) == Some(column.name.as_str()))
+                    .collect();
+                if pattern_change && is_text(&old.kind) {
+                    for index in &indexes {
+                        statements.push(drop_pattern_index(dialect, &index.name));
+                    }
+                }
                 if old.kind != column.kind {
                     let target = dialect.column_type(&column.kind);
                     statements.push(plain(format!(
                         "ALTER TABLE {} ALTER COLUMN {name} TYPE {target} USING {name}::{target}",
                         q(table)
                     )));
+                }
+                if pattern_change && is_text(&column.kind) {
+                    let target = after.existing(table)?;
+                    for index in &indexes {
+                        statements.extend(pattern_index(
+                            dialect,
+                            target,
+                            table,
+                            &index.name,
+                            &index.columns,
+                            index.unique,
+                        ));
+                    }
                 }
                 if old.null != column.null {
                     statements.push(plain(format!(
@@ -359,6 +448,15 @@ pub fn compile(
             }
             statements
         }
+        Operation::RunSql { sql, .. } => sql.iter().map(|s| plain(s.clone())).collect(),
+        Operation::RunPython { .. } => Vec::new(),
+        Operation::CreateExtension { name } if postgres => {
+            vec![plain(format!("CREATE EXTENSION IF NOT EXISTS {}", q(name)))]
+        }
+        Operation::DropExtension { name } if postgres => {
+            vec![plain(format!("DROP EXTENSION IF EXISTS {}", q(name)))]
+        }
+        Operation::CreateExtension { .. } | Operation::DropExtension { .. } => Vec::new(),
     })
 }
 

@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use async_channel::Receiver;
 use ferro_database::{
@@ -34,18 +35,39 @@ pub(crate) struct Connection {
     /// The transaction's BEGIN has not been sent yet: it travels with the first statement
     /// (Feature 020), and a transaction without statements never sends BEGIN or COMMIT.
     begin_pending: bool,
+    /// The BEGIN statement of the pending or open transaction (with its isolation level).
+    begin_statement: &'static str,
+    opened: Instant,
+    last_used: Instant,
 }
 
 impl Connection {
+    /// Whether the connection must be replaced before its next job: broken, or past
+    /// `max_lifetime` / `max_idle` (never inside a transaction).
+    fn needs_replacing(&self, config: &PgConfig) -> bool {
+        if self.client.is_closed() {
+            return true;
+        }
+        if self.in_transaction {
+            return false;
+        }
+        config
+            .max_lifetime
+            .is_some_and(|limit| self.opened.elapsed() >= limit)
+            || config
+                .max_idle
+                .is_some_and(|limit| self.last_used.elapsed() >= limit)
+    }
+
     /// Whether the next statement must carry the pending BEGIN (and clears it).
-    fn take_begin(&mut self) -> bool {
-        std::mem::take(&mut self.begin_pending)
+    fn take_begin(&mut self) -> Option<&'static str> {
+        std::mem::take(&mut self.begin_pending).then_some(self.begin_statement)
     }
 
     /// Sends a pending BEGIN on its own (before savepoints and batches).
     async fn flush_begin(&mut self) -> Result<(), DbError> {
-        if self.take_begin() {
-            if let Err(err) = self.client.batch_execute("BEGIN").await {
+        if let Some(begin) = self.take_begin() {
+            if let Err(err) = self.client.batch_execute(begin).await {
                 self.in_transaction = false;
                 return Err(map_error(err));
             }
@@ -54,21 +76,41 @@ impl Connection {
     }
 }
 
+/// A failure of a statement sent with [`with_begin_ref`]: `begin_failed` when the pipelined
+/// BEGIN itself failed (no transaction is open), else the statement failed inside it.
+struct Failed {
+    error: DbError,
+    begin_failed: bool,
+}
+
 /// Runs `statement` with a pending BEGIN pipelined in front of it: both requests leave in one
 /// round trip. BEGIN is Ferro's fixed statement, which fails only when the connection itself
-/// fails, and then the statement after it fails too. On an error the caller ends the
-/// transaction state.
+/// fails, and then the statement after it fails too.
 async fn with_begin_ref<T>(
     client: &Client,
     statement: impl std::future::Future<Output = Result<T, tokio_postgres::Error>>,
-    begin: bool,
-) -> Result<T, DbError> {
-    if !begin {
-        return statement.await.map_err(map_error);
+    begin: Option<&'static str>,
+) -> Result<T, Failed> {
+    let failed = |err, begin_failed| Failed {
+        error: map_error(err),
+        begin_failed,
+    };
+    let Some(begin) = begin else {
+        return statement.await.map_err(|err| failed(err, false));
+    };
+    let (begun, result) = tokio::join!(client.batch_execute(begin), statement);
+    begun.map_err(|err| failed(err, true))?;
+    result.map_err(|err| failed(err, false))
+}
+
+impl Connection {
+    /// The error of [`with_begin_ref`], after ending the transaction state if BEGIN failed.
+    fn settle(&mut self, failed: Failed) -> DbError {
+        if failed.begin_failed {
+            self.in_transaction = false;
+        }
+        failed.error
     }
-    let (begun, result) = tokio::join!(client.batch_execute("BEGIN"), statement);
-    begun.map_err(map_error)?;
-    result.map_err(map_error)
 }
 
 pub(crate) async fn connect(shared: &Shared) -> Result<Connection, DbError> {
@@ -87,6 +129,9 @@ pub(crate) async fn connect(shared: &Shared) -> Result<Connection, DbError> {
         statements: HashMap::new(),
         in_transaction: false,
         begin_pending: false,
+        begin_statement: "BEGIN",
+        opened: Instant::now(),
+        last_used: Instant::now(),
     })
 }
 
@@ -110,10 +155,15 @@ pub(crate) async fn run(
 
 /// Runs one job, reconnecting first when the connection broke.
 async fn run_job(shared: &Shared, connection: &mut Option<Connection>, job: Job) -> JobResult {
-    if connection.as_ref().is_none_or(|c| c.client.is_closed()) {
+    if connection
+        .as_ref()
+        .is_none_or(|c| c.needs_replacing(&shared.config))
+    {
+        *connection = None;
         *connection = Some(connect(shared).await?);
     }
     let active = connection.as_mut().expect("connected above");
+    active.last_used = Instant::now();
     let retry = job.clone();
     let result = match execute(active, job).await {
         // A schema change (migration) invalidated a cached prepared statement: refresh the
@@ -148,6 +198,35 @@ async fn run_session(
             skip(&task.job);
             continue;
         }
+        if !lost
+            && let Some(active) = connection.as_ref()
+            && active.in_transaction
+            && active.client.is_closed()
+        {
+            // The connection broke between two statements of the transaction.
+            if active.begin_pending {
+                // Nothing was sent yet: the transaction starts on a new connection.
+                match connect(shared).await {
+                    Ok(mut fresh) => {
+                        fresh.in_transaction = true;
+                        fresh.begin_pending = true;
+                        fresh.begin_statement = active.begin_statement;
+                        *connection = Some(fresh);
+                    }
+                    Err(err) => {
+                        *connection = None;
+                        lost = true;
+                        (task.done)(Err(err));
+                        continue;
+                    }
+                }
+            } else {
+                // Its statements were rolled back with it; reconnecting would run the rest
+                // outside any transaction.
+                *connection = None;
+                lost = true;
+            }
+        }
         if lost {
             (task.done)(Err(DbError::Unavailable {
                 message: "the database connection was lost during the transaction; it was \
@@ -168,7 +247,7 @@ async fn run_session(
         && active.in_transaction
     {
         active.in_transaction = false;
-        if !active.take_begin() {
+        if active.take_begin().is_none() {
             active
                 .client
                 .batch_execute("ROLLBACK")
@@ -218,13 +297,10 @@ async fn query(connection: &mut Connection, statement: &Statement) -> JobResult 
     let values = refs(&values);
     let begin = connection.take_begin();
     let client = &connection.client;
-    let rows = with_begin_ref(client, client.query(&prepared, &values), begin)
-        .await
-        .inspect_err(|_| {
-            if begin {
-                connection.in_transaction = false;
-            }
-        })?;
+    let rows = match with_begin_ref(client, client.query(&prepared, &values), begin).await {
+        Ok(rows) => rows,
+        Err(failed) => return Err(connection.settle(failed)),
+    };
     let columns = prepared
         .columns()
         .iter()
@@ -249,9 +325,10 @@ async fn execute(connection: &mut Connection, job: Job) -> JobResult {
             let values = refs(&values);
             let begin = connection.take_begin();
             let client = &connection.client;
-            with_begin_ref(client, client.execute(&prepared, &values), begin)
-                .await
-                .map(Outcome::Affected)
+            match with_begin_ref(client, client.execute(&prepared, &values), begin).await {
+                Ok(affected) => Ok(Outcome::Affected(affected)),
+                Err(failed) => Err(connection.settle(failed)),
+            }
         }
         Job::Batch {
             statements,
@@ -296,21 +373,25 @@ async fn execute(connection: &mut Connection, job: Job) -> JobResult {
             in_transaction(connection, &statements, false).await
         }
         Job::Transaction(command) => {
-            if command == TransactionCommand::Begin && connection.in_transaction {
+            if command.is_begin() && connection.in_transaction {
                 return Err(DbError::Operational {
                     message: "a transaction is already open on this connection".into(),
                 });
             }
             match command {
                 // Sent later, with the first statement.
-                TransactionCommand::Begin => {
+                TransactionCommand::Begin | TransactionCommand::BeginIsolated(_) => {
                     connection.in_transaction = true;
                     connection.begin_pending = true;
+                    connection.begin_statement = match command {
+                        TransactionCommand::BeginIsolated(isolation) => isolation.postgres_begin(),
+                        _ => "BEGIN",
+                    };
                     return Ok(Outcome::Affected(0));
                 }
                 // Nothing was sent: there is nothing to commit or roll back.
                 TransactionCommand::Commit | TransactionCommand::Rollback
-                    if connection.take_begin() =>
+                    if connection.take_begin().is_some() =>
                 {
                     connection.in_transaction = false;
                     return Ok(Outcome::Affected(0));
@@ -324,7 +405,9 @@ async fn execute(connection: &mut Connection, job: Job) -> JobResult {
                 .map(|()| Outcome::Affected(0))
                 .map_err(map_error);
             match command {
-                TransactionCommand::Begin => connection.in_transaction = result.is_ok(),
+                TransactionCommand::Begin | TransactionCommand::BeginIsolated(_) => {
+                    connection.in_transaction = result.is_ok();
+                }
                 TransactionCommand::Commit | TransactionCommand::Rollback => {
                     connection.in_transaction = false;
                 }

@@ -6,8 +6,28 @@ and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 
 
 ## [Unreleased]
 
+### Security
+
+Follow-up review of Features 018–020 ([docs/security-audit.md](docs/security-audit.md)):
+
+- A PostgreSQL connection lost between two statements of a transaction no longer lets the
+  rest of the transaction autocommit on a new connection; it fails instead.
+- Unread WebSocket messages are limited to 1 MiB per connection (not only 32 messages);
+  writes to a client that stopped reading time out after 60 s.
+- WebSocket sessions of a login invalidated by a password change carry no session data.
+- Response-annotation errors no longer log the returned values; server-sent event fields
+  are checked when sent.
+
 ### Added
 
+- Database completeness (Feature 021), from a comparison with Django's database reference:
+  - `transaction(isolation="read committed" | "repeatable read" | "serializable")`.
+  - `QuerySet.iterator(chunk_size=1000)`: async iteration in chunks (keyset pagination on the
+    primary key when unordered), no server-side cursor.
+  - Migration operations `ops.RunSQL`, `ops.RunPython` (data migrations, in the migration's
+    transaction), `ops.CreateExtension` / `ops.DropExtension`.
+  - PostgreSQL URL parameters `max_lifetime` and `max_idle`; SQLite URL parameter `timeout`.
+  - `ferro db sequence-reset` / `db.reset_sequences()`.
 - `ferro run` and `ferro dev` warn when the native module is an unoptimized debug build
   (`maturin develop`), which is 3–5 times slower; the performance guide explains how to measure.
 - `tests/benchmarks/run_020.py`: the e-commerce checkout under load on PostgreSQL.
@@ -16,6 +36,15 @@ and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 
 
 - PostgreSQL transactions send `BEGIN` together with their first statement (one round trip
   less), and a transaction that runs no statement sends nothing.
+- PostgreSQL serialization failures and deadlocks raise `DatabaseUnavailableError` (a subclass
+  of `OperationalError`, as before): retry the transaction.
+- PostgreSQL: an index on a `String`/`Text` field also gets a `text_pattern_ops` index, so
+  `startswith` lookups can use an index under non-C collations.
+
+### Fixed
+
+- PostgreSQL: inserting a row with an explicit primary key no longer leaves the key sequence
+  behind (the next `create()` failed with `IntegrityError`).
 - The e-commerce example inserts an order once, with its total.
 
 ## [0.5.0rc2] — 2026-10-20

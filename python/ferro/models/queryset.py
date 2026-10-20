@@ -4,7 +4,7 @@ relations, values, SQL) lives in the native core; this class only forwards, and 
 
 from __future__ import annotations
 
-from collections.abc import Generator, Iterable
+from collections.abc import AsyncIterator, Generator, Iterable
 from typing import TYPE_CHECKING, Any
 
 from ferro import _ferro
@@ -153,6 +153,47 @@ class QuerySet[M: Model]:
 
     def __await__(self) -> Generator[Any, None, list[M]]:
         return self._all().__await__()
+
+    async def iterator(self, chunk_size: int = 1000) -> AsyncIterator[M]:
+        """Yields the records ``chunk_size`` at a time, so a large result never sits in memory
+        whole::
+
+            async for order in Order.objects.filter(paid=True).iterator(chunk_size=500):
+                ...
+
+        Unordered querysets of records page by primary key (each chunk starts after the last
+        key seen, so rows added or removed meanwhile are never skipped twice or repeated).
+        Ordered querysets and ``values()`` page by position, with the primary key breaking ties.
+        Sliced and grouped querysets are fetched in one query. ``prefetch_related`` runs per
+        chunk. No server-side cursor is held, so it works through PgBouncer in transaction mode.
+        """
+        if not isinstance(chunk_size, int) or isinstance(chunk_size, bool) or chunk_size < 1:
+            raise ValueError("chunk_size must be a positive integer")
+        query = self._query
+        if self._result_cache is not None or query.windowed or query.grouped:
+            for item in await self._all():
+                yield item
+            return
+        if not query.ordered and not query.returns_values:
+            keyed = query.order_by(["pk"])
+            page = keyed.window(None, chunk_size)
+            while True:
+                found = await self._run(page)
+                for item in found:
+                    yield item
+                if len(found) < chunk_size:
+                    return
+                after = _tree((), {"pk__gt": found[-1].pk}, False)
+                page = keyed.filter(after).window(None, chunk_size)
+        query = query.with_pk_tiebreak()
+        start = 0
+        while True:
+            found = await self._run(query.window(start or None, chunk_size))
+            for item in found:
+                yield item
+            if len(found) < chunk_size:
+                return
+            start += chunk_size
 
     async def count(self) -> int:
         if self._result_cache is not None:

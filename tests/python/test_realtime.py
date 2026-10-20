@@ -195,6 +195,43 @@ def test_sockets_see_the_logged_in_user():
             assert ws.receive_json() == {"authenticated": True, "name": "ann"}
 
 
+def test_sockets_drop_sessions_of_changed_passwords():
+    """After a password change the session is over for sockets too: no user and none of its
+    data (security review, 2026-10-20)."""
+    app = App()
+    app.add_auth()
+
+    @app.post("/login")
+    async def sign_in(request):
+        user = await auth.authenticate("ann", "correct horse")
+        await auth.login(request, user)
+        request.session["tenant"] = "acme"
+
+    @app.post("/setup")
+    async def setup():
+        await User.objects.create_user("ann", password="correct horse")
+
+    @app.post("/change")
+    async def change():
+        user = await User.objects.get(username="ann")
+        await user.set_password("battery staple horse")
+        await user.save()
+
+    @app.websocket("/whoami")
+    async def whoami(ws):
+        await ws.send_json({"name": ws.user.username, "session": dict(ws.session)})
+
+    tables = [User, Group, Permission, Session]
+    with TestClient(app, database_url="sqlite:///:memory:", create_tables=tables) as client:
+        client.post("/setup")
+        client.post("/login")
+        with client.websocket_connect("/whoami") as ws:
+            assert ws.receive_json()["session"]["tenant"] == "acme"
+        client.post("/change")
+        with client.websocket_connect("/whoami") as ws:
+            assert ws.receive_json() == {"name": "", "session": {}}
+
+
 # -- streaming and server-sent events -----------------------------------------------------------
 
 
@@ -291,6 +328,13 @@ def test_server_sent_events():
             lines = list(response.iter_lines())
         assert lines.count(": ping") >= 2
         assert "data: late" in lines
+
+
+def test_event_fields_are_checked_when_sent():
+    event = ServerSentEvent("ok", event="tick")
+    event.event = "tick\ndata: injected"
+    with pytest.raises(ValueError, match="line breaks"):
+        event.encode()
 
 
 def test_disconnect_closes_the_generator():

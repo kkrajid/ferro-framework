@@ -75,6 +75,10 @@ not consume (32 waiting), and `send()` waits only when 1 MiB is already queued f
 
 ### Security
 
+**Middleware does not run for WebSocket routes** (`@app.middleware` wraps HTTP requests and
+responses). Checks that your HTTP routes get from middleware — staff-only path prefixes, IP
+allow-lists, header tokens, tenant resolution — must be repeated in the socket handler.
+
 The handshake goes through the engine's checks before your code runs:
 
 - **Origin check**: a page on another site cannot open a socket to your app (cross-site

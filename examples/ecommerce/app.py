@@ -175,26 +175,36 @@ async def create_order(request):
     # Every database round trip here holds the stock rows' locks, so there are as few as
     # possible: the order is inserted once with its total, after the stock is taken.
     async with transaction():
-        total = Decimal("0.00")
-        taken_lines: list[tuple[Product, int]] = []
-        for product_id, quantity in sorted(quantities.items()):
-            found = await Product.objects.filter(pk=product_id, active=True).first()
-            if found is None:
+        # All products in one query; then one conditional stock update per product, in id
+        # order so concurrent checkouts lock rows in the same order (no deadlocks).
+        wanted = sorted(quantities)
+        found = {p.pk: p for p in await Product.objects.filter(pk__in=wanted, active=True)}
+        for product_id in wanted:
+            if product_id not in found:
                 raise HTTPException(404, f"Product {product_id} not found")
+        total = Decimal("0.00")
+        for product_id in wanted:
+            quantity = quantities[product_id]
             taken = await Product.objects.filter(pk=product_id, stock__gte=quantity).update(
                 stock=F("stock") - quantity
             )
             if not taken:
-                raise HTTPException(409, f"Not enough stock for {found.name!r}")
-            taken_lines.append((found, quantity))
-            total += found.price * quantity
+                raise HTTPException(409, f"Not enough stock for {found[product_id].name!r}")
+            total += found[product_id].price * quantity
         order = await Order.objects.create(customer=request.user, total=total)
         lines = [
-            await OrderLine.objects.create(
-                order=order, product=product, quantity=quantity, unit_price=product.price
+            OrderLine(
+                order=order,
+                product=found[product_id],
+                quantity=quantities[product_id],
+                unit_price=found[product_id].price,
             )
-            for product, quantity in taken_lines
+            for product_id in wanted
         ]
+        if len(lines) == 1:
+            await lines[0].save()
+        else:
+            await OrderLine.objects.bulk_create(lines)
     return Response(order_json(order, lines), status=201)
 
 
@@ -227,12 +237,13 @@ async def cancel_order(request, order_id: int):
         )
         if not changed:
             raise HTTPException(409, f"Order {order_id} is {order.status} and cannot be cancelled")
-        for line in await OrderLine.objects.filter(order=order):
+        lines = await OrderLine.objects.filter(order=order).order_by("pk")
+        for line in sorted(lines, key=lambda line: line.product_id):
             await Product.objects.filter(pk=line.product_id).update(
                 stock=F("stock") + line.quantity
             )
     order.status = Order.CANCELLED
-    return order_json(order, await OrderLine.objects.filter(order=order).order_by("pk"))
+    return order_json(order, lines)
 
 
 @app.post("/api/orders/{order_id}/pay")

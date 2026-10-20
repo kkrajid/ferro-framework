@@ -47,10 +47,11 @@ fn queue_full() -> DbError {
 
 impl SqliteConfig {
     /// `sqlite:///relative.db`, `sqlite:////absolute.db`, `sqlite:///C:/x.db`,
-    /// `sqlite:///:memory:`, optionally followed by `?queue_size=N`.
+    /// `sqlite:///:memory:`, optionally followed by `?queue_size=N&timeout=SECONDS`.
     pub fn from_url(url: &str) -> Result<Self, DbError> {
         let (url, query) = url.split_once('?').unwrap_or((url, ""));
         let mut queue_size = QUEUE_CAPACITY;
+        let mut busy_timeout = Duration::from_secs(5);
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
             match key {
@@ -65,10 +66,25 @@ impl SqliteConfig {
                             ),
                         })?;
                 }
+                // How long a write waits for another connection's lock (Feature 021).
+                "timeout" => {
+                    busy_timeout = value
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|s| s.is_finite() && (0.0..=3600.0).contains(s))
+                        .map(Duration::from_secs_f64)
+                        .ok_or_else(|| DbError::Other {
+                            message: format!(
+                                "invalid timeout '{value}' in the database URL: expected 0 to \
+                                 3600 seconds"
+                            ),
+                        })?;
+                }
                 other => {
                     return Err(DbError::Other {
                         message: format!(
-                            "unknown parameter '{other}' in the database URL (SQLite accepts queue_size)"
+                            "unknown parameter '{other}' in the database URL (SQLite accepts \
+                             queue_size and timeout)"
                         ),
                     });
                 }
@@ -96,7 +112,7 @@ impl SqliteConfig {
         Ok(Self {
             path,
             pool_size,
-            busy_timeout: Duration::from_secs(5),
+            busy_timeout,
             queue_size,
         })
     }

@@ -60,3 +60,27 @@ nginx example blocks `/metrics`.
 - **Deserialization and code execution**: no pickle or YAML; `eval` only in `ferro shell`; the
   cache stores JSON; migration loader only loads `NNNN_name.py` from the configured directory;
   migration names validated; `ferro new` validates project names.
+
+## Follow-up review — Features 018–020 (2026-10-20)
+
+**Scope**: WebSockets and streaming (018), the Pydantic integration (019), the database-latency
+changes (020). **Method**: read-only review of every code path, each finding confirmed against
+the code and then fixed test-first.
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| 11 | High (integrity) | A PostgreSQL connection that broke *between* two statements of a transaction was silently replaced, so the remaining statements and the `COMMIT` ran in autocommit: a partial commit the application believed atomic. Feature 020's deferred `BEGIN` widened the window | **Fixed**: the session notices the broken connection before the next statement; if nothing was sent yet the transaction starts on a new connection, otherwise the rest of the transaction fails (`crates/postgres/src/worker.rs` `run_session`). Test: `test_a_connection_lost_inside_a_transaction_commits_nothing` (failed before the fix) |
+| 12 | Medium | With `BEGIN` pipelined, a failing *first statement* cleared the transaction state although PostgreSQL was still inside the transaction; a session ending without an explicit rollback could return the connection to the pool mid-transaction | **Fixed**: the state is cleared only when `BEGIN` itself failed (`with_begin_ref` reports which request failed) |
+| 13 | Medium (DoS) | Unread WebSocket messages were bounded by count only (32 × `max_body_size` = 32 MiB per socket) | **Fixed**: the engine also stops reading at 1 MiB of unread messages (`SocketLink::room_for_inbound`). Test: `unread_messages_are_bounded_in_bytes` |
+| 14 | Low/Medium | Application middleware does not run for WebSocket routes, and the guide did not say so | **Documented** in the real-time guide (Security) |
+| 15 | Low | `read_session` (used for `ws.user`/`ws.session`) returned the session data of a login invalidated by a password change | **Fixed**: the session is deleted and empty data returned, as for HTTP. Test: `test_sockets_drop_sessions_of_changed_passwords` |
+| 16 | Low | No timeout on writing to a WebSocket client that stopped reading: shutdown, pings and the application's close waited for TCP to give up | **Fixed**: each write is bounded by 60 s, then the connection closes (`crates/http/src/socket.rs`) |
+| 17 | Info | A response-annotation mismatch logged the offending values (could be password hashes or personal data); `ServerSentEvent` fields were checked for line breaks only at construction | **Fixed**: the log names fields and problems without values; fields are checked again when an event is sent. Tests in `test_pydantic.py`, `test_realtime.py` |
+
+Checked and found sound: the cross-origin check and rate limit on WebSocket handshakes,
+frame-size limits and close codes, outbound back-pressure, broadcast queue and payload limits,
+`LISTEN`/`NOTIFY` channel handling, SSE encoding, Pydantic body limits and error messages, the
+reloader's bytecode removal, signal handling.
+
+Open item: a streamed response (`StreamingResponse`) to a client that stops reading keeps its
+generator suspended until the connection times out at the TCP level.

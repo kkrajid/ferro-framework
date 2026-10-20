@@ -76,6 +76,8 @@ pub enum Job {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransactionCommand {
     Begin,
+    /// BEGIN with an isolation level (PostgreSQL; SQLite transactions are serializable already).
+    BeginIsolated(Isolation),
     Commit,
     Rollback,
     Savepoint(u32),
@@ -83,11 +85,45 @@ pub enum TransactionCommand {
     RollbackTo(u32),
 }
 
+/// Transaction isolation levels (`transaction(isolation=...)`, Feature 021).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Isolation {
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+impl Isolation {
+    /// `"read committed"`, `"repeatable read"` or `"serializable"` (any case).
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "read committed" => Some(Self::ReadCommitted),
+            "repeatable read" => Some(Self::RepeatableRead),
+            "serializable" => Some(Self::Serializable),
+            _ => None,
+        }
+    }
+
+    /// PostgreSQL's BEGIN for this level.
+    pub fn postgres_begin(self) -> &'static str {
+        match self {
+            Self::ReadCommitted => "BEGIN ISOLATION LEVEL READ COMMITTED",
+            Self::RepeatableRead => "BEGIN ISOLATION LEVEL REPEATABLE READ",
+            Self::Serializable => "BEGIN ISOLATION LEVEL SERIALIZABLE",
+        }
+    }
+}
+
 impl TransactionCommand {
+    /// Whether the command opens a transaction.
+    pub fn is_begin(self) -> bool {
+        matches!(self, Self::Begin | Self::BeginIsolated(_))
+    }
+
     /// SQL for the command; `begin` is the dialect's BEGIN statement.
     pub fn sql(self, begin: &str) -> String {
         match self {
-            Self::Begin => begin.to_string(),
+            Self::Begin | Self::BeginIsolated(_) => begin.to_string(),
             Self::Commit => "COMMIT".to_string(),
             Self::Rollback => "ROLLBACK".to_string(),
             Self::Savepoint(n) => format!("SAVEPOINT ferro_sp_{n}"),

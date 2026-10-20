@@ -485,6 +485,11 @@ impl PyQuery {
         self.derive(py, self.query.reversed())
     }
 
+    /// The same query ordered additionally by the primary key (Feature 021).
+    fn with_pk_tiebreak(&self, py: Python<'_>) -> Self {
+        self.derive(py, self.query.with_pk_tiebreak())
+    }
+
     #[getter]
     fn ordered(&self) -> bool {
         self.query.is_ordered()

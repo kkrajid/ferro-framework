@@ -30,7 +30,7 @@ PUBLIC = {
     ],
     "ferro.db": [
         "DatabaseUnavailableError", "TransactionError", "connect", "create_tables", "disconnect",
-        "is_connected", "transaction",
+        "is_connected", "reset_sequences", "transaction",
     ],
     "ferro.auth": [
         "AnonymousUser", "Group", "PasswordError", "Permission", "Session", "User",

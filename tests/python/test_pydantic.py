@@ -280,6 +280,7 @@ def test_return_annotations_convert_orm_objects(capfd):
         assert client.get("/categories/1").status_code == 500
     log = capfd.readouterr().err
     assert "wrong" in log and "does not match its return annotation" in log
+    assert "not a number" not in log, "returned values are not logged"
     # Unloaded relations say how to load them.
     assert "select_related('category')" in log
     assert "prefetch_related('products')" in log

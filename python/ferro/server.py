@@ -229,17 +229,21 @@ def serve(
     # process cleanly, not through the signal's default action.
     _install_signal_handlers()
     try:
-        host, port = runner.start()
-    except (KeyboardInterrupt, _Shutdown):
-        runner.close()
-        return 0
-    if banner is not None:
-        shown_host = f"[{host}]" if ":" in host else host
-        url = f"{settings.scheme}://{shown_host}:{port}"
-        print(banner.format(url=url), file=sys.stderr, flush=True)
-    _warn_debug_build()
-    try:
         try:
+            host, port = runner.start()
+        except (KeyboardInterrupt, _Shutdown):
+            # Stopped while starting: the server may already be running.
+            with contextlib.suppress(Exception):
+                runner.stop(graceful=False)
+                runner.wait(5)
+            return 0
+        try:
+            # Inside the handlers' reach: a stop request arriving now takes the normal path.
+            if banner is not None:
+                shown_host = f"[{host}]" if ":" in host else host
+                url = f"{settings.scheme}://{shown_host}:{port}"
+                print(banner.format(url=url), file=sys.stderr, flush=True)
+            _warn_debug_build()
             while not runner.wait(_WAIT_SLICE):
                 pass
             return 0

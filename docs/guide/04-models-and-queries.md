@@ -17,15 +17,18 @@ FERRO_DATABASE_URL=postgresql://user:password@host:5432/dbname?sslmode=require
 
 | URL | Notes |
 |---|---|
-| `sqlite:///relative/path.db`, `sqlite:////absolute/path.db` (Windows: `sqlite:///C:/data/app.db`), `sqlite:///:memory:` | file databases use WAL mode, foreign keys on, 4 connections; `?queue_size=N` |
+| `sqlite:///relative/path.db`, `sqlite:////absolute/path.db` (Windows: `sqlite:///C:/data/app.db`), `sqlite:///:memory:` | file databases use WAL mode, foreign keys on, 4 connections; `?queue_size=N`, `?timeout=SECONDS` (how long a write waits for another connection's lock, default 5) |
 | `postgresql://user:pass@host:port/db` (or `postgres://`) | parameters below |
 
 PostgreSQL parameters: `sslmode` (`disable`, `prefer` (default), `require`, `verify-full`;
 certificates are always verified when TLS is used), `sslrootcert=/path/ca.pem`, `pool_size`
 (default 10 connections per process), `queue_size` (default 1024 waiting queries; beyond that
 queries fail at once with `DatabaseUnavailableError`), `connect_timeout`, `options`
-(e.g. `-csearch_path=tenant1`), `application_name`. Broken connections are reopened on the next
-query; passwords never appear in error messages.
+(e.g. `-csearch_path=tenant1`, `-cstatement_timeout=5000`), `application_name`, `max_lifetime`
+and `max_idle` (seconds: a pooled connection older, or unused for longer, is replaced before its
+next query — never inside a transaction; useful behind load balancers and failover proxies that
+drop old connections, or to spread connections after a replica comes back; default: no limit).
+Broken connections are reopened on the next query; passwords never appear in error messages.
 
 Outside the server (scripts, notebooks, tests):
 
@@ -149,7 +152,15 @@ await cheap.exclude(stock=0).count()
 | `await Model.objects.create(**values)` | saved object |
 | `await Model.objects.bulk_create(objs, batch_size=None, ignore_conflicts=False)` | the objects, keys set |
 | `await Model.objects.bulk_update(objs, fields=["price"])` | number of rows |
+| `async for obj in qs.iterator(chunk_size=1000)` | objects, fetched in chunks |
 | `qs.sql()` | `(sql, params)` — what would run |
+
+`iterator()` keeps memory flat for large results (exports, batch jobs): it fetches
+`chunk_size` rows per query. An unordered queryset pages by primary key, so rows deleted or
+added meanwhile are never repeated or skipped; an ordered one (or `values()`) pages by position
+with the primary key breaking ties. `prefetch_related` runs per chunk. It holds no server-side
+cursor, so it works through PgBouncer in transaction mode; sliced and grouped querysets are
+fetched in one query.
 
 ### Lookups
 
@@ -320,6 +331,34 @@ async def place_order(...): ...
   PostgreSQL: a failed statement aborts the transaction; wrap risky statements in a nested
   `transaction()` to recover.
 
+### Isolation levels
+
+```python
+async with transaction(isolation="serializable"):
+    ...
+```
+
+`isolation` is `"read committed"` (PostgreSQL's default), `"repeatable read"` (every query of
+the block sees the same snapshot) or `"serializable"` (the block behaves as if transactions ran
+one after another). It applies to the outermost block; a nested block that asks for one raises
+`TransactionError`. Under the stricter levels PostgreSQL aborts a transaction that would break
+the guarantee — that raises `DatabaseUnavailableError` (so do deadlocks), and the right reaction
+is to run the whole block again:
+
+```python
+for attempt in range(3):
+    try:
+        async with transaction(isolation="serializable"):
+            await transfer(source, target, amount)
+        break
+    except DatabaseUnavailableError:
+        if attempt == 2:
+            raise
+```
+
+SQLite transactions are already serializable (one writer at a time), so the option changes
+nothing there.
+
 ### Locking rows
 
 ```python
@@ -358,7 +397,7 @@ write lock.
 | `ProtectedError` | delete blocked by `PROTECT` |
 | `FieldError` | unknown field or lookup, invalid value or model definition |
 | `RelatedNotLoaded` | relation read without loading it |
-| `DatabaseUnavailableError` | database unreachable, lost connection, lock wait (`nowait`), full queue — answered 503 if unhandled |
+| `DatabaseUnavailableError` | database unreachable, lost connection, lock wait (`nowait`, SQLite `timeout`), full queue, serialization failure or deadlock (retry the transaction) — answered 503 if unhandled |
 | `OperationalError`, `DatabaseError` | other database errors |
 | `TransactionError` | `select_for_update()` outside a transaction |
 
@@ -370,4 +409,35 @@ write lock.
 | Case-insensitive lookups | ASCII only | Unicode |
 | `Decimal` precision | 15 significant digits | up to 38 digits |
 | NULLs in ascending order | first | last |
+| Isolation | serializable | `transaction(isolation=...)`, read committed by default |
+| Explicit primary keys (`create(id=10)`) | later keys continue after the highest | Ferro moves the key sequence past them |
+| `startswith`/`contains` on indexed text | `LIKE` (ASCII case-insensitive) | a second `text_pattern_ops` index serves prefix searches under any collation |
 | Good for | development, tests, small single-machine sites | production, several processes or machines |
+
+### PostgreSQL notes
+
+- **PgBouncer**: session pooling works as is. Transaction pooling needs PgBouncer 1.21+ with
+  `max_prepared_statements` set, because Ferro prepares statements and caches them per
+  connection; beyond that Ferro keeps no session state between transactions and no
+  server-side cursors (`iterator()` included). The database broadcast backend (`LISTEN`)
+  always needs session pooling or a direct connection.
+- **Explicit primary keys**: inserting a row with its own `id` moves the table's key sequence
+  past it (never back), so the next `create()` does not collide. For rows loaded by other tools
+  (`psql`, `pg_restore` of partial data), run `ferro db sequence-reset` (or
+  `await db.reset_sequences()`).
+- **Pattern indexes**: `index=True` on a `String`/`Text` field also creates
+  `<index>_like ... (column text_pattern_ops)`, because under a non-`C` collation the plain
+  index cannot serve `LIKE 'prefix%'`. Indexes created by earlier Ferro versions do not have it; add
+  it with a migration (`ops.RunSQL`) if you need it.
+- **Extensions**: `ops.CreateExtension("pg_trgm")` in a migration (see
+  [migrations](05-migrations.md#data-migrations-and-raw-sql)).
+- **Timeouts**: `?options=-cstatement_timeout%3D5000` caps every statement at 5 s;
+  `lock_timeout` works the same way.
+
+### Faster test databases
+
+- SQLite in memory (`sqlite:///:memory:`) is fastest; `TestClient(app, database_url=...,
+  create_tables=[...])` creates the tables per client.
+- For PostgreSQL tests, run the server with `fsync=off`, `synchronous_commit=off` and
+  `full_page_writes=off` (never in production), and give each test its own schema
+  (`?options=-csearch_path%3Dtest_42`) instead of a new database.

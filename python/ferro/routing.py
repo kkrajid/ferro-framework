@@ -467,9 +467,13 @@ def _response_adapter(handler: Callable[..., Any], name: str) -> Callable[[Any],
         try:
             value = adapter.validate_python(result, from_attributes=True)
         except invalid as exc:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in detail['loc']) or 'value'}: {detail['msg']}"
+                for detail in exc.errors(include_url=False, include_input=False)
+            )
             raise TypeError(
                 f"handler {name} returned a value that does not match its return annotation "
-                f"{shown}: {exc}{_relation_hints(exc)}"
+                f"{shown}: {problems}{_relation_hints(exc)}"
             ) from None
         return Response(adapter.dump_json(value), media_type="application/json")
 

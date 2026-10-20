@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import inspect
 import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -139,6 +140,35 @@ def _now() -> str:
     return dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
 
 
+async def _apply(loaded: list[LoadedMigration], index: int, forward: bool) -> None:
+    """Applies (``forward``) or reverts one migration atomically, with its history row."""
+    from ferro.db import transaction
+
+    current = loaded[index]
+    previous = [m.as_native() for m in loaded[:index]]
+    if not current.migration.runs_python:
+        await _ferro.apply_migration(previous, current.as_native(), forward, _now())
+        return
+    # Data migrations: Python code and SQL share one transaction, in order (reversed when
+    # reverting); the history row commits with them.
+    steps = list(current.migration.operations)
+    if not forward:
+        steps.reverse()
+    async with transaction():
+        for operation in steps:
+            if isinstance(operation, ops.RunPython):
+                function = operation.forward if forward else operation.backward
+                if function is None:
+                    raise MigrationError(f"{current.name}: RunPython has no backward function")
+                result = function()
+                if inspect.isawaitable(result):
+                    await result
+            else:
+                single = (current.name, [operation.to_dict()])
+                await _ferro.apply_migration(previous, single, forward, _now(), False)
+        await _ferro.apply_migration(previous, (current.name, []), forward, _now())
+
+
 async def migrate(
     directory: Path | str,
     *,
@@ -153,8 +183,7 @@ async def migrate(
         current = loaded[index]
         if before:
             before(current.name)
-        previous = [m.as_native() for m in loaded[:index]]
-        await _ferro.apply_migration(previous, current.as_native(), True, _now())
+        await _apply(loaded, index, True)
         done.append(current.name)
         if after:
             after(current.name)
@@ -193,8 +222,7 @@ async def rollback(
         current = loaded[index]
         if before:
             before(current.name)
-        previous = [m.as_native() for m in loaded[:index]]
-        await _ferro.apply_migration(previous, current.as_native(), False, _now())
+        await _apply(loaded, index, False)
         done.append(current.name)
         if after:
             after(current.name)

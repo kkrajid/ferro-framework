@@ -34,10 +34,15 @@ fn key_columns(detail: Option<&str>) -> Vec<String> {
 }
 
 /// Server states that mean "cannot serve now, try again" rather than a bad statement:
-/// connection exceptions (class 08), too many connections, shutting down / starting up, and a
-/// lock that is not available.
+/// connection exceptions (class 08), too many connections, shutting down / starting up, a lock
+/// that is not available, and a transaction the server aborted so it can be retried
+/// (serialization failure, deadlock — Feature 021).
 fn unavailable(code: &str) -> bool {
-    code.starts_with("08") || matches!(code, "53300" | "57P01" | "57P02" | "57P03" | "55P03")
+    code.starts_with("08")
+        || matches!(
+            code,
+            "53300" | "57P01" | "57P02" | "57P03" | "55P03" | "40001" | "40P01"
+        )
 }
 
 pub(crate) fn map_error(err: tokio_postgres::Error) -> DbError {

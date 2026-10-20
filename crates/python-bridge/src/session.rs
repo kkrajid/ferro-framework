@@ -108,8 +108,22 @@ impl Session {
         })
     }
 
-    fn begin<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.control(py, TransactionCommand::Begin)
+    /// Opens the transaction; `isolation`: "read committed", "repeatable read" or
+    /// "serializable" (Feature 021).
+    #[pyo3(signature = (isolation=None))]
+    fn begin<'py>(&self, py: Python<'py>, isolation: Option<&str>) -> PyResult<Bound<'py, PyAny>> {
+        let command = match isolation {
+            None => TransactionCommand::Begin,
+            Some(name) => TransactionCommand::BeginIsolated(
+                ferro_database::Isolation::parse(name).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown isolation level {name:?}; use \"read committed\", \
+                         \"repeatable read\" or \"serializable\""
+                    ))
+                })?,
+            ),
+        };
+        self.control(py, command)
     }
 
     fn commit<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {

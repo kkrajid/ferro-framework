@@ -157,3 +157,35 @@ def test_unhandled_unavailability_is_503(postgres_server, capfd):
     lines = [line for line in err.splitlines() if request_id in line]
     assert any("database unavailable" in line and "WARN" in line for line in lines), lines
     assert not any("Traceback" in line for line in lines)
+
+
+async def test_a_connection_lost_inside_a_transaction_commits_nothing(postgres_server):
+    """The server ends the connection between two statements of a transaction: the rest of the
+    block must fail rather than autocommit on a new connection (security review, Feature 020)."""
+    from ferro.db import transaction
+
+    server = restartable(postgres_server)
+    terminate = (
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'ferro' "
+        "AND pid <> pg_backend_pid() AND backend_type = 'client backend'"
+    )
+    await db.connect(pg_url(server), pool_size=1)
+    try:
+        await db.create_tables([Gadget])
+        with pytest.raises(DatabaseUnavailableError):
+            async with transaction():
+                await Gadget.objects.create(name="first")
+                server.execute(terminate)
+                await asyncio.sleep(0.3)  # the client notices the closed connection
+                await Gadget.objects.create(name="second")
+        assert await Gadget.objects.count() == 0, "nothing of the transaction was committed"
+
+        # Lost before anything was sent: the transaction simply runs on a new connection.
+        await Gadget.objects.count()
+        server.execute(terminate)
+        await asyncio.sleep(0.3)
+        async with transaction():
+            await Gadget.objects.create(name="third")
+        assert [g.name for g in await Gadget.objects.all()] == ["third"]
+    finally:
+        await db.disconnect()

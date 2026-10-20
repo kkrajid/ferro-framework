@@ -560,6 +560,29 @@ pub(crate) fn insert<'py>(
     let database = current(py)?;
     let statement = compile::insert(database.dialect, &meta, &values, true);
     let instance = instance.unbind();
+    // An explicit value for an automatic key: keep the sequence ahead of it (PostgreSQL).
+    let explicit_key = values.iter().any(|(i, _)| *i == meta.pk);
+    if explicit_key && let Some(sync) = compile::sync_sequence(database.dialect, &meta) {
+        return submit(
+            py,
+            &database,
+            Job::Batch {
+                statements: vec![statement, sync],
+                returning: true,
+            },
+            Box::new(move |py, result| match result {
+                Ok(Outcome::Batch { returned, .. }) => {
+                    let pk = returned.into_iter().next().flatten();
+                    mark_saved(py, &meta, instance.bind(py), pk)?;
+                    Ok(py.None())
+                }
+                Ok(other) => Err(PyRuntimeError::new_err(format!(
+                    "unexpected database outcome {other:?}"
+                ))),
+                Err(err) => Err(db_error(py, err, Some(&meta))),
+            }),
+        );
+    }
     submit(
         py,
         &database,
@@ -573,6 +596,51 @@ pub(crate) fn insert<'py>(
                 .and_then(|r| r.into_iter().next());
             mark_saved(py, &meta, instance.bind(py), pk)?;
             Ok(py.None())
+        }),
+    )
+}
+
+/// Moves every automatic primary key sequence up to its table's highest key (PostgreSQL;
+/// `ferro db sequence-reset`). Resolves to the tables checked; nothing to do on SQLite.
+#[pyfunction]
+#[pyo3(signature = (qualnames=None))]
+pub(crate) fn reset_sequences<'py>(
+    py: Python<'py>,
+    qualnames: Option<Vec<String>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let database = current(py)?;
+    let mut tables = Vec::new();
+    let mut statements = Vec::new();
+    for meta in registered_metas(py, qualnames)? {
+        if let Some(sync) = compile::sync_sequence(database.dialect, &meta) {
+            tables.push(meta.table.clone());
+            statements.push(sync);
+        }
+    }
+    submit(
+        py,
+        &database,
+        Job::Batch {
+            statements,
+            returning: true,
+        },
+        Box::new(move |py, result| match result {
+            Ok(Outcome::Batch { returned, .. }) => {
+                let moved: Vec<&String> = tables
+                    .iter()
+                    .zip(returned)
+                    .filter(|(_, value)| value.is_some())
+                    .map(|(table, _)| table)
+                    .collect();
+                Ok((tables.clone(), moved)
+                    .into_pyobject(py)?
+                    .into_any()
+                    .unbind())
+            }
+            Ok(other) => Err(PyRuntimeError::new_err(format!(
+                "unexpected database outcome {other:?}"
+            ))),
+            Err(err) => Err(db_error(py, err, None)),
         }),
     )
 }
@@ -678,6 +746,12 @@ pub(crate) fn bulk_insert<'py>(
             true,
             ignore_conflicts,
         ));
+    }
+    if meta.pk_field().auto
+        && auto_needed.iter().any(|needed| !needed)
+        && let Some(sync) = compile::sync_sequence(database.dialect, &meta)
+    {
+        statements.push(sync);
     }
     let instances: Vec<Py<PyAny>> = instances.into_iter().map(Bound::unbind).collect();
     submit(

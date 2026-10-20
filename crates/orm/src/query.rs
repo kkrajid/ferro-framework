@@ -540,6 +540,23 @@ impl Query {
         next
     }
 
+    /// The ordering with the primary key appended as a last tie-breaker, so that consecutive
+    /// windows of the result never skip or repeat rows (`QuerySet.iterator()`, Feature 021).
+    pub fn with_pk_tiebreak(&self) -> Self {
+        let mut next = self.clone();
+        let has_pk = next.ordering.iter().any(|order| {
+            matches!(&order.target, OrderTarget::Field(path)
+                if path.hops.is_empty() && path.field == self.model.pk)
+        });
+        if !has_pk {
+            next.ordering.push(Order {
+                target: OrderTarget::Field(FieldPath::local(&self.model, self.model.pk)),
+                descending: false,
+            });
+        }
+        next
+    }
+
     pub fn is_ordered(&self) -> bool {
         !self.ordering.is_empty()
     }

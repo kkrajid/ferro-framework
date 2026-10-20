@@ -188,6 +188,20 @@ fn op_from_dict(
             table: text("table")?,
             name: text("name")?,
         },
+        "run_sql" => Operation::RunSql {
+            sql: optional(dict, "sql")?
+                .ok_or_else(|| migration_error(py, "run_sql needs 'sql'"))?,
+            reverse_sql: optional(dict, "reverse_sql")?,
+        },
+        "run_python" => Operation::RunPython {
+            reversible: optional(dict, "reversible")?.unwrap_or(false),
+        },
+        "create_extension" => Operation::CreateExtension {
+            name: text("name")?,
+        },
+        "drop_extension" => Operation::DropExtension {
+            name: text("name")?,
+        },
         other => return Err(migration_error(py, format!("unknown operation '{other}'"))),
     })
 }
@@ -277,6 +291,25 @@ fn op_to_dict<'py>(
         Operation::DropIndex { table, name } => {
             dict.set_item("op", "drop_index")?;
             dict.set_item("table", table)?;
+            dict.set_item("name", name)?;
+        }
+        Operation::RunSql { sql, reverse_sql } => {
+            dict.set_item("op", "run_sql")?;
+            dict.set_item("sql", sql)?;
+            if let Some(reverse_sql) = reverse_sql {
+                dict.set_item("reverse_sql", reverse_sql)?;
+            }
+        }
+        Operation::RunPython { reversible } => {
+            dict.set_item("op", "run_python")?;
+            dict.set_item("reversible", reversible)?;
+        }
+        Operation::CreateExtension { name } => {
+            dict.set_item("op", "create_extension")?;
+            dict.set_item("name", name)?;
+        }
+        Operation::DropExtension { name } => {
+            dict.set_item("op", "drop_extension")?;
             dict.set_item("name", name)?;
         }
     }
@@ -377,21 +410,56 @@ pub(crate) fn migration_sql<'py>(
         .collect()
 }
 
-/// Applies (or reverts) one migration and its history row in a single transaction.
+/// Applies (or reverts) one migration and its history row in a single transaction. Inside
+/// `transaction()` (migrations with `RunPython`) the statements join it; `record=False` leaves
+/// the history row to a later call.
 #[pyfunction]
+#[pyo3(signature = (previous, migration, forward, applied_at, record=true))]
 pub(crate) fn apply_migration<'py>(
     py: Python<'py>,
     previous: Vec<Migration<'py>>,
     migration: Migration<'py>,
     forward: bool,
     applied_at: String,
+    record: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let database = current(py)?;
     let dialect = database.dialect;
     let mut statements = statements_for(py, dialect, &previous, &migration, forward)?;
     let table = dialect.quote(HISTORY);
     let name = migration.0.clone();
-    statements.push(if forward {
+    if record {
+        statements.push(history_statement(
+            dialect, &table, name, forward, applied_at,
+        ));
+    }
+    let job = if crate::session::active(py)?.is_some() {
+        Job::Batch {
+            statements,
+            returning: false,
+        }
+    } else {
+        Job::Schema(statements)
+    };
+    submit(
+        py,
+        &database,
+        job,
+        Box::new(|py, result| match result {
+            Ok(_) => Ok(py.None()),
+            Err(err) => Err(db_error(py, err, None)),
+        }),
+    )
+}
+
+fn history_statement(
+    dialect: &dyn Dialect,
+    table: &str,
+    name: String,
+    forward: bool,
+    applied_at: String,
+) -> Statement {
+    if forward {
         Statement::new(
             format!(
                 "INSERT INTO {table} (\"name\", \"applied_at\") VALUES ({}, {})",
@@ -408,16 +476,7 @@ pub(crate) fn apply_migration<'py>(
             ),
             vec![Value::Text(name)],
         )
-    });
-    submit(
-        py,
-        &database,
-        Job::Schema(statements),
-        Box::new(|py, result| match result {
-            Ok(_) => Ok(py.None()),
-            Err(err) => Err(db_error(py, err, None)),
-        }),
-    )
+    }
 }
 
 /// Creates the history table if it does not exist.

@@ -196,18 +196,26 @@ class ServerSentEvent:
         retry: int | None = None,
         comment: str | None = None,
     ) -> None:
-        for name, value in (("event", event), ("id", id), ("comment", comment)):
-            if value is not None and any(ch in str(value) for ch in "\r\n"):
-                raise ValueError(f"server-sent event {name} must not contain line breaks")
-        if retry is not None and (not isinstance(retry, int) or retry < 0):
-            raise ValueError("retry must be a non-negative number of milliseconds")
         self.data = data
         self.event = event
         self.id = id
         self.retry = retry
         self.comment = comment
+        self._check()
+
+    def _check(self) -> None:
+        for name in ("event", "id", "comment"):
+            value = getattr(self, name)
+            if value is not None and any(ch in str(value) for ch in "\r\n"):
+                raise ValueError(f"server-sent event {name} must not contain line breaks")
+        retry = self.retry
+        if retry is not None and (
+            not isinstance(retry, int) or isinstance(retry, bool) or retry < 0
+        ):
+            raise ValueError("retry must be a non-negative number of milliseconds")
 
     def encode(self) -> str:
+        self._check()
         lines = []
         if self.comment is not None:
             lines.append(f": {self.comment}")

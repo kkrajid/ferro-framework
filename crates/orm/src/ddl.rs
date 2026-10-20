@@ -7,7 +7,7 @@ use ferro_database::Statement;
 
 use crate::compile::Dialect;
 use crate::error::OrmError;
-use crate::field::FieldMeta;
+use crate::field::{FieldKind, FieldMeta};
 use crate::meta::ModelMeta;
 
 /// One column definition, e.g. `"sku" varchar(40) NOT NULL UNIQUE` or
@@ -51,6 +51,41 @@ pub fn index_name(table: &str, column: &str) -> String {
     format!("{table}_{column}_idx")
 }
 
+/// PostgreSQL's name for the pattern index that accompanies index `name` (63-byte limit).
+pub fn pattern_index_name(name: &str) -> String {
+    let mut end = name.len().min(58);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}_like", &name[..end])
+}
+
+/// PostgreSQL: a single-column index on a `String`/`Text` column gets a second index with
+/// `text_pattern_ops`, because under a non-C collation the plain index cannot serve prefix
+/// `LIKE` (`startswith`) lookups (Feature 021). `None` for other dialects and kinds.
+pub fn pattern_index_sql(
+    dialect: &dyn Dialect,
+    table: &str,
+    name: &str,
+    column: &str,
+    kind: &FieldKind,
+) -> Option<String> {
+    if dialect.name() != "postgresql" || !is_text(kind) {
+        return None;
+    }
+    Some(format!(
+        "CREATE INDEX {} ON {} ({} text_pattern_ops)",
+        dialect.quote(&pattern_index_name(name)),
+        dialect.quote(table),
+        dialect.quote(column)
+    ))
+}
+
+/// Whether `kind` is stored as text (`varchar` or `text`).
+pub fn is_text(kind: &FieldKind) -> bool {
+    matches!(kind, FieldKind::String { .. } | FieldKind::Text)
+}
+
 pub fn create_index_sql(dialect: &dyn Dialect, table: &str, name: &str, column: &str) -> String {
     create_composite_index_sql(dialect, table, name, &[column.to_string()], false)
 }
@@ -81,15 +116,16 @@ pub fn create_table(dialect: &dyn Dialect, meta: &ModelMeta) -> Vec<Statement> {
         vec![],
     )];
     for field in meta.fields.iter().filter(|f| f.index && !f.unique) {
+        let name = index_name(&meta.table, &field.column);
         statements.push(Statement::new(
-            create_index_sql(
-                dialect,
-                &meta.table,
-                &index_name(&meta.table, &field.column),
-                &field.column,
-            ),
+            create_index_sql(dialect, &meta.table, &name, &field.column),
             vec![],
         ));
+        if let Some(sql) =
+            pattern_index_sql(dialect, &meta.table, &name, &field.column, &field.kind)
+        {
+            statements.push(Statement::new(sql, vec![]));
+        }
     }
     for index in &meta.indexes {
         statements.push(Statement::new(

@@ -13,16 +13,20 @@ Operations are declarative; the native engine turns them into SQL for the connec
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
+
+from ferro.migrations.errors import MigrationError
 
 __all__ = [
     "AddColumn",
     "AlterColumn",
     "Column",
+    "CreateExtension",
     "CreateIndex",
     "CreateTable",
+    "DropExtension",
     "DropIndex",
     "DropTable",
     "Migration",
@@ -30,6 +34,8 @@ __all__ = [
     "RemoveColumn",
     "RenameColumn",
     "RenameTable",
+    "RunPython",
+    "RunSQL",
     "from_dict",
 ]
 
@@ -344,6 +350,122 @@ class DropIndex(Operation):
         return f"ops.DropIndex({_q(self.table)}, {_q(self.name)})"
 
 
+def _statements(sql: str | Sequence[str], what: str) -> list[str]:
+    statements = [sql] if isinstance(sql, str) else list(sql)
+    if not all(isinstance(statement, str) and statement.strip() for statement in statements):
+        raise MigrationError(f"{what}: expected SQL text or a list of SQL texts")
+    return statements
+
+
+@dataclass
+class RunSQL(Operation):
+    """Hand-written SQL: one statement per string (a list for several). ``reverse_sql`` makes
+    the migration reversible (``[]`` when there is nothing to undo). The recorded schema does
+    not change, so use it for data, triggers, functions or views — not for tables and columns
+    your models declare."""
+
+    sql: str | Sequence[str]
+    reverse_sql: str | Sequence[str] | None = None
+    op: ClassVar[str] = "run_sql"
+
+    def __post_init__(self) -> None:
+        if not _statements(self.sql, "RunSQL"):
+            raise MigrationError("RunSQL needs at least one statement")
+        if self.reverse_sql is not None:
+            _statements(self.reverse_sql, "RunSQL reverse_sql")
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {"op": self.op, "sql": _statements(self.sql, "RunSQL")}
+        if self.reverse_sql is not None:
+            data["reverse_sql"] = _statements(self.reverse_sql, "RunSQL reverse_sql")
+        return data
+
+    def describe(self) -> str:
+        return "run SQL"
+
+    def fragment(self) -> str:
+        return "run_sql"
+
+    def render(self, indent: int, imports: set[str]) -> str:
+        reverse = "" if self.reverse_sql is None else f", reverse_sql={self.reverse_sql!r}"
+        return f"ops.RunSQL({self.sql!r}{reverse})"
+
+
+@dataclass
+class RunPython(Operation):
+    """Python code in a migration (data migrations). ``forward`` — and ``backward`` for
+    rollbacks — take no arguments, may be ``async`` and run inside the migration's transaction,
+    so their ORM queries commit or roll back with it. A migration with ``RunPython`` may only
+    contain ``RunPython``, ``RunSQL`` and extension operations; put schema changes in their own
+    migration. ``backward=RunPython.noop`` allows rollbacks that need no undo."""
+
+    forward: Callable[[], Any]
+    backward: Callable[[], Any] | None = None
+    op: ClassVar[str] = "run_python"
+
+    @staticmethod
+    def noop() -> None:
+        """A backward (or forward) step that does nothing."""
+
+    def __post_init__(self) -> None:
+        backward_ok = self.backward is None or callable(self.backward)
+        if not callable(self.forward) or not backward_ok:
+            raise MigrationError("RunPython takes functions: RunPython(forward, backward=None)")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"op": self.op, "reversible": self.backward is not None}
+
+    def describe(self) -> str:
+        return f"run {getattr(self.forward, '__name__', 'Python code')}"
+
+    def fragment(self) -> str:
+        return "run_python"
+
+
+@dataclass
+class CreateExtension(Operation):
+    """``CREATE EXTENSION IF NOT EXISTS`` on PostgreSQL (``"pg_trgm"``, ``"citext"``,
+    ``"unaccent"``...); nothing on SQLite. Needs a role allowed to create the extension."""
+
+    name: str
+    op: ClassVar[str] = "create_extension"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"op": self.op, "name": self.name}
+
+    def describe(self) -> str:
+        return f"create extension {self.name}"
+
+    def fragment(self) -> str:
+        return f"extension_{self.name}"
+
+    def render(self, indent: int, imports: set[str]) -> str:
+        return f"ops.CreateExtension({_q(self.name)})"
+
+
+@dataclass
+class DropExtension(Operation):
+    """``DROP EXTENSION IF EXISTS`` on PostgreSQL; nothing on SQLite."""
+
+    name: str
+    op: ClassVar[str] = "drop_extension"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"op": self.op, "name": self.name}
+
+    def describe(self) -> str:
+        return f"drop extension {self.name}"
+
+    def fragment(self) -> str:
+        return f"remove_extension_{self.name}"
+
+    def render(self, indent: int, imports: set[str]) -> str:
+        return f"ops.DropExtension({_q(self.name)})"
+
+
+# Operations allowed next to RunPython (they leave the recorded schema unchanged).
+_DATA_OPERATIONS = (RunPython, RunSQL, CreateExtension, DropExtension)
+
 _OPERATIONS: dict[str, type[Operation]] = {
     cls.op: cls
     for cls in (
@@ -356,6 +478,9 @@ _OPERATIONS: dict[str, type[Operation]] = {
         RenameColumn,
         CreateIndex,
         DropIndex,
+        RunSQL,
+        CreateExtension,
+        DropExtension,
     )
 }
 
@@ -380,3 +505,14 @@ class Migration:
 
     dependencies: Sequence[str] = field(default_factory=list)
     operations: Sequence[Operation] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.runs_python and not all(isinstance(o, _DATA_OPERATIONS) for o in self.operations):
+            raise MigrationError(
+                "a migration with RunPython may only contain RunPython, RunSQL and extension "
+                "operations; move the schema changes to a separate migration"
+            )
+
+    @property
+    def runs_python(self) -> bool:
+        return any(isinstance(operation, RunPython) for operation in self.operations)

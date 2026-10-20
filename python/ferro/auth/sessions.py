@@ -182,7 +182,11 @@ async def read_session(cookies: Any) -> tuple[Any, Any]:
     if row is None:
         return AnonymousUser(), types.MappingProxyType({})
     user = row.user if row.user_id is not None else None
-    if user is not None and (not user.is_active or not _login_valid(row.data, user)):
+    if user is not None and not _login_valid(row.data, user):
+        # Password changed or login too old: the session is over, as for HTTP requests.
+        await Session.objects.filter(pk=row.pk).delete()
+        return AnonymousUser(), types.MappingProxyType({})
+    if user is not None and not user.is_active:
         user = None
     return user or AnonymousUser(), types.MappingProxyType(dict(row.data))
 
