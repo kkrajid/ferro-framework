@@ -47,7 +47,19 @@ jobs:
       - run: uv run --python .venv ruff check python tests examples
       - run: uv run --python .venv ruff format --check python tests examples
       - run: uv run --python .venv maturin develop --uv
-      - run: uv run --python .venv pytest
+      - name: pytest
+        shell: bash
+        run: |
+          set +e
+          uv run --python .venv pytest -rfE 2>&1 | tee pytest.log
+          status=${PIPESTATUS[0]}
+          # Failures as annotations: visible on the run page and through the API without signing in.
+          grep -E "^(FAILED|ERROR) " pytest.log | head -8 | while IFS= read -r line; do
+            echo "::error title=pytest::${line}"
+          done
+          details=$(grep -E "^E  " pytest.log | head -40 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          if [ -n "$details" ]; then echo "::error title=pytest details::${details}"; fi
+          exit $status
 
   postgres:
     name: ORM on PostgreSQL (ubuntu)
