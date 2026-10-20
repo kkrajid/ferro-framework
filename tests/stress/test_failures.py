@@ -458,8 +458,20 @@ def test_slow_headers_do_not_hold_up_other_clients(serve, tmp_path, stress_resul
     with socket.create_connection(("127.0.0.1", server.port), timeout=10) as raw:
         started = time.monotonic()
         raw.sendall(b"GET /plain HTTP/1.1\r\n")
-        normal = [httpx.get(f"{server.base}/plain", timeout=5).status_code for _ in range(10)]
-        normal_took = time.monotonic() - started
+        normal: list[int] = []
+        normal_took = 0.0
+
+        def others() -> None:
+            nonlocal normal_took
+            normal.extend(
+                httpx.get(f"{server.base}/plain", timeout=5).status_code for _ in range(10)
+            )
+            normal_took = time.monotonic() - started
+
+        # Other clients run meanwhile; the cut-off is measured on its own (on slow machines ten
+        # requests alone can take longer than the limit).
+        other_clients = threading.Thread(target=others)
+        other_clients.start()
         try:
             data = raw.recv(256)
             while data and b"\r\n" not in data:
@@ -467,6 +479,7 @@ def test_slow_headers_do_not_hold_up_other_clients(serve, tmp_path, stress_resul
         except (ConnectionResetError, ConnectionAbortedError):
             data = b""
         cut_off = time.monotonic() - started
+        other_clients.join(60)
     passed = normal == [200] * 10 and cut_off < 3 and (data == b"" or b" 408 " in data)
     stress_results.record(
         "A client sending headers slowly (1 s header timeout)",
