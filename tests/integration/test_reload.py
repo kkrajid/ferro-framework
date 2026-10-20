@@ -1,5 +1,6 @@
 """User Story 5 — `ferro dev` auto-reload (FR-021, SC-005)."""
 
+import os
 import time
 
 import httpx
@@ -26,15 +27,21 @@ def wait_for_version(base_url: str, version: int, timeout: float) -> float:
 
 
 def test_edit_is_served_after_reload(ferro_cli, tmp_path):
+    # Same size and the same whole second: Python's `.pyc` check cannot tell the versions apart,
+    # so the reloaded server must not reuse the first one's bytecode cache.
+    second = int(time.time()) - 10
     source = tmp_path / "app.py"
     source.write_text(APP.format(version=1))
+    os.utime(source, ns=(second * 10**9 + 100_000_000,) * 2)
     port = _free_port()
-    server = ferro_cli("dev", "--port", str(port), cwd=tmp_path)
+    server = ferro_cli(
+        "dev", "--port", str(port), cwd=tmp_path, env={"PYTHONDONTWRITEBYTECODE": ""}
+    )
     base_url = f"http://127.0.0.1:{port}"
     wait_for_version(base_url, 1, 10)
 
-    time.sleep(0.6)  # distinct mtime
     source.write_text(APP.format(version=2))
+    os.utime(source, ns=(second * 10**9 + 700_000_000,) * 2)
     elapsed = wait_for_version(base_url, 2, 10)
     assert elapsed < 4, f"reload took {elapsed:.2f}s"
 

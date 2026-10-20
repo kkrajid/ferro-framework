@@ -42,6 +42,17 @@ this candidate also adds the features below).
 - `TestClient` requests take `content=` for raw bodies; `ferro routes` lists WebSocket routes
   as `WEBSOCKET`.
 
+### Fixed
+
+- `ferro dev` could keep serving the old code after an edit that kept the file size within the
+  same second (Python reused the stale `.pyc`); the reloader now drops the changed files'
+  bytecode before restarting.
+- With `--processes N`, a client's first requests arriving in several workers at once could
+  each claim an entry in the shared rate table and get one extra request; they now share one.
+- `ferro_build_info` reports the version as `ferro --version` does (`0.5.0rc2`, not
+  `0.5.0-rc.2`).
+- The release workflow file did not parse; GitHub Actions moved to Node 24 versions.
+
 ## [0.5.0rc1] — 2026-10-11
 
 First release candidate; the first version published as wheels.

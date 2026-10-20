@@ -49,6 +49,10 @@ class PostgresServer:
 
     def start(self) -> None:
         options = f"-p {self.port} -c listen_addresses=127.0.0.1"
+        if sys.platform != "win32" and self.data:
+            # The default socket directory (/var/run/postgresql) is often not writable by the
+            # user running the tests (CI runners); keep the socket next to the cluster.
+            options += f" -c unix_socket_directories={Path(self.data).parent}"
         log = ["-l", self.log] if self.log else []
         self._pg_ctl("-o", options, *log, "-w", "start")
 

@@ -117,6 +117,43 @@ fn concurrent_requests_never_exceed_the_budget() {
     assert_eq!(allowed.load(Ordering::SeqCst), 100);
 }
 
+/// A new client's first requests arriving in several processes at once must share one entry:
+/// a process that loses the race for a free slot must not claim a second one (seen on Apple
+/// silicon CI as 11 requests allowed out of 10).
+#[test]
+fn racing_first_requests_share_one_entry() {
+    let (_dir, path) = table();
+    let t0 = now_us();
+    let rounds = 3000;
+    let threads = 4;
+    let barrier = Arc::new(std::sync::Barrier::new(threads));
+    let allowed: Arc<Vec<AtomicUsize>> =
+        Arc::new((0..rounds).map(|_| AtomicUsize::new(0)).collect());
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            let (path, barrier, allowed) = (path.clone(), barrier.clone(), allowed.clone());
+            std::thread::spawn(move || {
+                let rates = RateTable::open(&path).unwrap();
+                for round in 0..rounds {
+                    let client = IpAddr::from([10, 9, (round >> 8) as u8, round as u8]);
+                    barrier.wait();
+                    if rates.check_at(0, client, 1, Duration::from_secs(3600), t0) == Some(Ok(())) {
+                        allowed[round].fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let doubled = allowed
+        .iter()
+        .filter(|n| n.load(Ordering::SeqCst) > 1)
+        .count();
+    assert_eq!(doubled, 0, "clients allowed twice with a budget of one");
+}
+
 #[test]
 fn many_clients_fit() {
     let (_dir, path) = table();

@@ -6,6 +6,8 @@ Polling ``*.py`` modification times needs no dependencies and meets the 2-second
 
 from __future__ import annotations
 
+import contextlib
+import importlib.util
 import os
 import signal
 import subprocess
@@ -53,6 +55,15 @@ def _changed(before: Snapshot, after: Snapshot) -> list[str]:
     return sorted(p for p in paths if before.get(p) != after.get(p))
 
 
+def _forget_bytecode(paths: list[str]) -> None:
+    """Deletes the cached bytecode of changed files: Python validates ``.pyc`` files by size and
+    whole-second mtime, so an edit that keeps the size within the same second would otherwise
+    load the old code."""
+    for path in paths:
+        with contextlib.suppress(OSError, ValueError, NotImplementedError):
+            os.remove(importlib.util.cache_from_source(path))
+
+
 def _start(child_argv: list[str]) -> subprocess.Popen[bytes]:
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
     return subprocess.Popen([sys.executable, "-m", "ferro", *child_argv], creationflags=flags)
@@ -97,6 +108,7 @@ def run_with_reload(child_argv: list[str], directories: list[Path]) -> int:
                 shown = ", ".join(os.path.relpath(p) for p in changed[:3])
                 _say(f"change detected in {shown}; reloading")
                 _stop(child)
+                _forget_bytecode(changed)
                 child = _start(child_argv)
                 exit_reported = False
             elif child.poll() is not None and not exit_reported:

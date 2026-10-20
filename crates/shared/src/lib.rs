@@ -220,7 +220,7 @@ impl RateTable {
         let slots = self.slots();
         let mask = slots.len() - 1;
         let start = hash as usize & mask;
-        for _attempt in 0..4 {
+        'attempt: for _attempt in 0..4 {
             // The client's own entry first, so a free slot earlier in the window never hides it.
             for offset in 0..PROBES {
                 let slot = &slots[(start + offset) & mask];
@@ -245,26 +245,30 @@ impl RateTable {
                 }
             }
             // Then an empty or expired slot (an expired entry is a full bucket: nothing to keep).
+            // Another process may claim this client's entry meanwhile (its first requests arrive
+            // everywhere at once): finding it, or losing a claim, starts over so the client never
+            // gets a second entry and a second budget.
             for offset in 0..PROBES {
                 let slot = &slots[(start + offset) & mask];
                 let current = slot.load(Ordering::Acquire);
-                let (_, tat) = unpack(current);
+                let (owner, tat) = unpack(current);
+                if current != 0 && owner == fingerprint {
+                    continue 'attempt;
+                }
                 if current != 0 && tat > now {
                     continue;
                 }
                 let Decision::Allow(next) = decide(now) else {
                     unreachable!("a full bucket always has a token");
                 };
-                if slot
-                    .compare_exchange(
-                        current,
-                        pack(fingerprint, next),
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
-                {
-                    return Some(Ok(()));
+                match slot.compare_exchange(
+                    current,
+                    pack(fingerprint, next),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Some(Ok(())),
+                    Err(_) => continue 'attempt,
                 }
             }
         }

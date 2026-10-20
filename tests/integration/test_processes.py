@@ -218,11 +218,16 @@ def test_every_worker_uses_the_same_database(tmp_path):
     process, base = start(tmp_path, "--processes", "2", source=DATABASE_APP)
     try:
         wait_ready(base, process, path="/visits")
-        with ThreadPoolExecutor(8) as pool, httpx.Client(timeout=10) as client:
+        # A new connection per request: a kept-alive connection stays with one worker.
+        with ThreadPoolExecutor(8) as pool:
             writers = set(
-                pool.map(lambda _: client.post(f"{base}/visits").json()["pid"], range(40))
+                pool.map(
+                    lambda _: httpx.post(f"{base}/visits", timeout=10).json()["pid"], range(40)
+                )
             )
-            readers = list(pool.map(lambda _: client.get(f"{base}/visits").json(), range(40)))
+            readers = list(
+                pool.map(lambda _: httpx.get(f"{base}/visits", timeout=10).json(), range(40))
+            )
     finally:
         interrupt(process)
         _, err = process.communicate(timeout=60)

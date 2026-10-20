@@ -76,8 +76,13 @@ def test_drain_keeps_serving_with_failing_readiness_then_stops(tmp_path):
     try:
         signalled = time.monotonic()
         interrupt(process)
-        time.sleep(0.2)
-        readiness = httpx.get(f"{base}/readyz", timeout=5)
+        # The drain starts when the signal is handled; slow CI machines need more than a moment.
+        deadline = signalled + 1.5
+        while True:
+            readiness = httpx.get(f"{base}/readyz", timeout=5)
+            if readiness.status_code == 503 or time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
         assert readiness.status_code == 503
         assert readiness.json() == {"status": "not ready", "failing": ["server"]}
         assert httpx.get(f"{base}/healthz", timeout=5).status_code == 200
