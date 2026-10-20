@@ -8,7 +8,7 @@ description = "Python application framework with a Rust-native execution engine"
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT OR Apache-2.0"
-license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "THIRD-PARTY-LICENSES.txt"]
 dynamic = ["version"]
 keywords = ["web", "framework", "orm", "async", "rust", "http"]
 classifiers = [

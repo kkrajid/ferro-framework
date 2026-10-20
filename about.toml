@@ -1,0 +1,34 @@
+# cargo-about: the licences of the Rust crates compiled into Ferro's native module, written to
+# THIRD-PARTY-LICENSES.txt (shipped in every wheel and the sdist). Regenerate after changing
+# dependencies:
+#
+#   cargo about generate -c about.toml -m crates/python-bridge/Cargo.toml about.hbs -o THIRD-PARTY-LICENSES.txt
+#
+# CI fails when the committed file is out of date.
+
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+
+# The platforms wheels are built for.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+workarounds = ["ring", "rustls"]

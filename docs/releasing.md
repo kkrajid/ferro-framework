@@ -21,6 +21,8 @@ repository.
    push).
 2. Set the version in `Cargo.toml` (`[workspace.package] version`, e.g. `0.5.0-rc.1` or `0.5.0`;
    Python sees `0.5.0rc1` / `0.5.0`) and run `cargo update -w` so `Cargo.lock` follows.
+   If dependencies changed, regenerate `THIRD-PARTY-LICENSES.txt` with the command in
+   `about.toml` (CI fails while it is out of date).
 3. Move the changelog's entries under the new version with today's date.
 4. Commit, then tag and push (**maintainer**):
 

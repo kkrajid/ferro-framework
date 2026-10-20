@@ -161,3 +161,7 @@ python/ferro          the Python API
 
 Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT) at your
 option.
+
+The native module includes open-source Rust crates (actix-web, tokio, PyO3, rustls and others),
+all under permissive licences; their notices are in
+[THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt), which ships in every wheel and the sdist.
