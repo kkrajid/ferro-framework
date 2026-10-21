@@ -208,17 +208,37 @@ pub(crate) async fn handle(
                 }
             }
             let stream = response.stream.take().and_then(|stream| stream.take());
+            // A stream of known length (files, Feature 025) is sent with `content-length`
+            // instead of chunked encoding, so clients show progress and can resume.
+            let length = match &stream {
+                Some(_) => {
+                    let length = response
+                        .header("content-length")
+                        .and_then(|v| v.trim().parse::<u64>().ok());
+                    response
+                        .headers
+                        .retain(|(n, _)| !n.eq_ignore_ascii_case("content-length"));
+                    length
+                }
+                None => None,
+            };
             let status = response.status;
             let http = into_http(response, &request_id, close, &state.policy);
-            let http = match stream {
+            let http = match (stream, length) {
+                (Some(source), Some(length)) => http
+                    .set_body(actix_web::body::SizedStream::new(
+                        length,
+                        crate::socket::chunks(source, state.lifecycle.clone()),
+                    ))
+                    .map_into_boxed_body(),
                 // Headers go now; the body follows chunk by chunk (Feature 018).
-                Some(source) => http
+                (Some(source), None) => http
                     .set_body(actix_web::body::BodyStream::new(crate::socket::chunks(
                         source,
                         state.lifecycle.clone(),
                     )))
                     .map_into_boxed_body(),
-                None => http,
+                (None, _) => http,
             };
             (status, http)
         }
@@ -431,7 +451,11 @@ async fn route(
             }
             let body = match tokio::time::timeout_at(
                 deadline,
-                read_body(req, payload, state.max_body_size),
+                read_body(
+                    req,
+                    payload,
+                    state.policy.body_limit(route_id, state.max_body_size),
+                ),
             )
             .await
             {

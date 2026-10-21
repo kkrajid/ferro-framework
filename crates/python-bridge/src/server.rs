@@ -29,7 +29,7 @@ pub(crate) fn parse_path(path: &str) -> PyResult<Vec<String>> {
         .map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
-/// `(methods, path, endpoint, name, rate_limit, csrf)`.
+/// `(methods, path, endpoint, name, rate_limit, csrf, websocket, max_body_size)`.
 type RouteRecord = (
     Vec<String>,
     String,
@@ -38,6 +38,7 @@ type RouteRecord = (
     Option<String>,
     bool,
     bool,
+    Option<usize>,
 );
 
 /// Everything `start` needs, built by `new`.
@@ -68,7 +69,7 @@ impl Server {
         let mut builder = Router::builder();
         let mut endpoints: Vec<Endpoint> = Vec::with_capacity(routes.len());
         let mut options: Vec<RouteOptions> = Vec::with_capacity(routes.len());
-        for (route_id, (methods, path, func, name, rate_limit, csrf, websocket)) in
+        for (route_id, (methods, path, func, name, rate_limit, csrf, websocket, max_body_size)) in
             routes.into_iter().enumerate()
         {
             let rate_limit = rate_limit
@@ -76,10 +77,16 @@ impl Server {
                 .map(RateSpec::parse)
                 .transpose()
                 .map_err(|err| PyValueError::new_err(format!("route {path} ({name}): {err}")))?;
+            if max_body_size.is_some_and(|size| size == 0 || size > 1 << 34) {
+                return Err(PyValueError::new_err(format!(
+                    "route {path} ({name}): max_body_size must be between 1 byte and 16 GiB"
+                )));
+            }
             options.push(RouteOptions {
                 csrf,
                 rate_limit,
                 websocket,
+                max_body_size,
             });
             let methods: Vec<Method> = methods.iter().map(|m| Method::parse(m)).collect();
             builder.add(&methods, &path, route_id).map_err(|err| {

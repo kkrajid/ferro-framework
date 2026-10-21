@@ -29,6 +29,8 @@ pub struct RouteOptions {
     pub rate_limit: Option<RateSpec>,
     /// A WebSocket endpoint: GET requests must upgrade (Feature 018).
     pub websocket: bool,
+    /// Replaces `max_body_size` for this route (uploads; Feature 025).
+    pub max_body_size: Option<usize>,
 }
 
 impl Default for RouteOptions {
@@ -37,6 +39,7 @@ impl Default for RouteOptions {
             csrf: true,
             rate_limit: None,
             websocket: false,
+            max_body_size: None,
         }
     }
 }
@@ -204,6 +207,14 @@ impl Policy {
             (Some(cors), Some(origin)) => cors.response_headers(origin).unwrap_or_default(),
             _ => Vec::new(),
         }
+    }
+
+    /// The body size limit of `route_id`: its own, else `default`.
+    pub fn body_limit(&self, route_id: usize, default: usize) -> usize {
+        self.routes
+            .get(route_id)
+            .and_then(|r| r.max_body_size)
+            .unwrap_or(default)
     }
 
     /// Whether `route_id` is a WebSocket endpoint.

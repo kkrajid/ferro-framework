@@ -10,6 +10,8 @@ repository.workspace = true
 [dependencies]
 argon2.workspace = true
 bytes.workspace = true
+memchr.workspace = true
+percent-encoding.workspace = true
 ferro-shared.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

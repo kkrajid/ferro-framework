@@ -16,10 +16,13 @@ ROOT = Path(__file__).resolve().parents[2]
 
 PUBLIC = {
     "ferro": [
-        "App", "CORS", "ConfigurationError", "EventStream", "HTTPException", "JSONResponse",
-        "Request", "Response", "ServerSentEvent", "StreamingResponse", "ValidationError",
-        "WebSocket", "WebSocketDisconnect", "__version__",
+        "App", "BackgroundTasks", "CORS", "ConfigurationError", "Cookie", "Depends",
+        "EventStream", "FileResponse", "Form", "FormData", "HTMLResponse", "HTTPException",
+        "Header", "JSONResponse", "PlainTextResponse", "RedirectResponse", "Request", "Response",
+        "ServerSentEvent", "StreamingResponse", "UploadFile", "ValidationError", "WebSocket",
+        "WebSocketDisconnect", "__version__",
     ],
+    "ferro.templating": ["Templates"],
     "ferro.models": [
         "Abs", "Avg", "BigInteger", "Boolean", "CASCADE", "Case", "Coalesce", "Concat", "Count",
         "DO_NOTHING", "DatabaseError", "DatabaseUnavailableError", "Date", "DateTime", "Decimal",

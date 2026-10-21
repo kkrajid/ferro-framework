@@ -6,7 +6,8 @@ use ferro_core::FerroRequest;
 use percent_encoding::percent_decode_str;
 use pyo3::exceptions::{PyKeyError, PyStopIteration};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyIterator, PyList};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyBytes, PyDict, PyIterator, PyList, PyString, PyTuple};
 
 use crate::json;
 use crate::types::types;
@@ -49,6 +50,62 @@ fn parse_form(body: &[u8]) -> Result<Vec<(String, String)>, String> {
             Ok((decode(key)?, decode(value)?))
         })
         .collect()
+}
+
+/// `ferro.uploads.FormData` and `UploadFile`, imported once.
+static UPLOAD_TYPES: PyOnceLock<(Py<PyAny>, Py<PyAny>)> = PyOnceLock::new();
+
+fn upload_types(py: Python<'_>) -> PyResult<&(Py<PyAny>, Py<PyAny>)> {
+    UPLOAD_TYPES.get_or_try_init(py, || {
+        let module = py.import("ferro.uploads")?;
+        Ok((
+            module.getattr("FormData")?.unbind(),
+            module.getattr("UploadFile")?.unbind(),
+        ))
+    })
+}
+
+/// A `multipart/form-data` body as `ferro.uploads.FormData`: text fields as `str`, file parts
+/// (those with a filename) as `UploadFile` (Feature 025).
+fn multipart_form(py: Python<'_>, body: &[u8], content_type: &str) -> PyResult<Py<PyAny>> {
+    let boundary = ferro_core::multipart::boundary(content_type)
+        .ok_or_else(|| bad_request(py, "Malformed multipart body: missing boundary".into()))?;
+    let parts = ferro_core::multipart::parse(body, &boundary, Default::default())
+        .map_err(|message| bad_request(py, format!("Malformed multipart body: {message}")))?;
+    let (form_data, upload_file) = upload_types(py)?;
+    let items = PyList::empty(py);
+    for part in parts {
+        let data = &body[part.data.clone()];
+        let value = match &part.filename {
+            Some(filename) => {
+                let headers = PyList::empty(py);
+                for (name, value) in &part.headers {
+                    headers.append(PyTuple::new(py, [name.as_str(), value.as_str()])?)?;
+                }
+                upload_file.bind(py).call1((
+                    part.name.as_str(),
+                    filename.as_str(),
+                    part.content_type.as_deref(),
+                    headers,
+                    PyBytes::new(py, data),
+                ))?
+            }
+            None => {
+                let text = std::str::from_utf8(data).map_err(|_| {
+                    bad_request(
+                        py,
+                        format!(
+                            "Malformed multipart body: field '{}' is not valid UTF-8",
+                            part.name
+                        ),
+                    )
+                })?;
+                PyString::new(py, text).into_any()
+            }
+        };
+        items.append((part.name.as_str(), value))?;
+    }
+    Ok(form_data.bind(py).call1((items,))?.unbind())
 }
 
 fn unique_keys<'a>(items: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
@@ -401,10 +458,12 @@ impl Request {
     }
 
     /// `await request.form()` → the fields of an `application/x-www-form-urlencoded` body, as a
-    /// mapping with `get`/`getlist` (repeated fields keep every value). Raises
+    /// mapping with `get`/`getlist` (repeated fields keep every value), or of a
+    /// `multipart/form-data` body as `ferro.uploads.FormData` (files as `UploadFile`). Raises
     /// `HTTPException(400)` for other content types or malformed bodies.
     fn form(&self, py: Python<'_>) -> PyResult<Ready> {
-        let media = self.header("content-type").map(|v| {
+        let content_type = self.header("content-type").map(str::to_string);
+        let media = content_type.as_deref().map(|v| {
             v.split(';')
                 .next()
                 .unwrap_or("")
@@ -413,12 +472,21 @@ impl Request {
         });
         match media.as_deref() {
             Some("application/x-www-form-urlencoded") => {}
+            Some("multipart/form-data") => {
+                let form = multipart_form(
+                    py,
+                    &self.inner.body,
+                    content_type.as_deref().unwrap_or_default(),
+                )?;
+                return Ok(Ready::new(form));
+            }
             None if self.inner.body.is_empty() => {}
             other => {
                 return Err(bad_request(
                     py,
                     format!(
-                        "Expected a form body (content-type application/x-www-form-urlencoded), got {}",
+                        "Expected a form body (content-type application/x-www-form-urlencoded \
+                         or multipart/form-data), got {}",
                         other.unwrap_or("no content type")
                     ),
                 ));

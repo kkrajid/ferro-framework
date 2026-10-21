@@ -26,6 +26,16 @@ Follow-up review of Features 018–020 ([docs/security-audit.md](docs/security-a
 
 ### Added
 
+- Requests and responses at FastAPI/Flask level (Feature 025):
+  - file uploads: `UploadFile` parameters, `multipart/form-data` in `request.form()`,
+    per-route `max_body_size`, `TestClient(files=...)`;
+  - `Form`, `Header` and `Cookie` parameters; `Depends` (with generator cleanup and per-request
+    caching); `BackgroundTasks`;
+  - `HTMLResponse`, `PlainTextResponse`, `RedirectResponse`, `FileResponse` (ETag, 304, ranges,
+    streamed with `Content-Length`);
+  - `app.static()`, `{name:path}` route segments, `app.url_for()`;
+  - `app.add_openapi()`: OpenAPI 3.1 document and Swagger UI;
+  - `ferro.templating.Templates` (Jinja2, `ferro-framework[templates]`).
 - Signals and hooks (Feature 024): `ferro.signals` (`Signal`, `receiver`, `pre_save`,
   `post_save`, `pre_delete`, `post_delete`, `m2m_changed`, `request_started`,
   `request_finished`, `got_request_exception`, `user_logged_in`, `user_logged_out`,

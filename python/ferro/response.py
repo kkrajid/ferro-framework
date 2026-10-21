@@ -135,6 +135,41 @@ class JSONResponse(Response):
         super().__init__(content, status, headers, "application/json")
 
 
+class HTMLResponse(Response):
+    """An HTML page (``text/html; charset=utf-8``). Escape untrusted values yourself, or render
+    with :class:`ferro.templating.Templates` (autoescaped)."""
+
+    __slots__ = ()
+
+    def __init__(self, content: Any = "", status: int = 200, headers: HeadersInput = None) -> None:
+        super().__init__(content, status, headers, "text/html; charset=utf-8")
+
+
+class PlainTextResponse(Response):
+    """Text (``text/plain; charset=utf-8``)."""
+
+    __slots__ = ()
+
+    def __init__(self, content: Any = "", status: int = 200, headers: HeadersInput = None) -> None:
+        super().__init__(content, status, headers, "text/plain; charset=utf-8")
+
+
+class RedirectResponse(Response):
+    """A redirect to ``url`` (``307`` keeps the method; ``303`` after a form POST, ``301``/``308``
+    for permanent moves). Never redirect to an address taken from the request without checking
+    it: that is an open redirect."""
+
+    __slots__ = ()
+
+    def __init__(self, url: str, status: int = 307, headers: HeadersInput = None) -> None:
+        if status not in (301, 302, 303, 307, 308):
+            raise ValueError(f"redirect status must be 301, 302, 303, 307 or 308, got {status!r}")
+        if not isinstance(url, str) or any(ch in url for ch in "\r\n\x00"):
+            raise ValueError(f"invalid redirect location {url!r}")
+        super().__init__(b"", status, headers)
+        self.headers.append(("location", url))
+
+
 def _async_iterator(content: Any) -> AsyncIterator[Any]:
     if hasattr(content, "__aiter__"):
         return content.__aiter__()

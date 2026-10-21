@@ -20,6 +20,8 @@ pub enum Segment {
     /// Decoded literal text. The empty string marks a trailing slash (or the root path).
     Static(String),
     Param(String),
+    /// `{name:path}`, the last segment: the rest of the path, slashes included (Feature 025).
+    Tail(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +38,7 @@ impl PathPattern {
         self.segments
             .iter()
             .filter_map(|s| match s {
-                Segment::Param(name) => Some(name.as_str()),
+                Segment::Param(name) | Segment::Tail(name) => Some(name.as_str()),
                 Segment::Static(_) => None,
             })
             .collect()
@@ -88,7 +90,8 @@ impl fmt::Display for RouteError {
             Self::InvalidParam { path, segment } => write!(
                 f,
                 "invalid route path '{path}': invalid parameter segment '{segment}' \
-                 (use '{{name}}' where name is a Python identifier)"
+                 (use '{{name}}' where name is a Python identifier, or '{{name:path}}' as the \
+                 last segment for the rest of the path)"
             ),
             Self::PartialParam { path, segment } => write!(
                 f,
@@ -147,7 +150,17 @@ pub fn parse_path(path: &str) -> Result<PathPattern, RouteError> {
         }
         let has_brace = part.contains('{') || part.contains('}');
         if part.len() >= 2 && part.starts_with('{') && part.ends_with('}') {
-            let name = &part[1..part.len() - 1];
+            let inner = &part[1..part.len() - 1];
+            let (name, tail) = match inner.split_once(':') {
+                Some((name, "path")) if index == last => (name, true),
+                Some(_) => {
+                    return Err(RouteError::InvalidParam {
+                        path: path.to_string(),
+                        segment: part.to_string(),
+                    });
+                }
+                None => (inner, false),
+            };
             if !is_identifier(name) {
                 return Err(RouteError::InvalidParam {
                     path: path.to_string(),
@@ -161,7 +174,11 @@ pub fn parse_path(path: &str) -> Result<PathPattern, RouteError> {
                 });
             }
             names.push(name);
-            segments.push(Segment::Param(name.to_string()));
+            segments.push(if tail {
+                Segment::Tail(name.to_string())
+            } else {
+                Segment::Param(name.to_string())
+            });
         } else if has_brace {
             let error = if part.contains('{') && !part.starts_with('{') {
                 RouteError::PartialParam {
@@ -202,6 +219,8 @@ pub enum Match {
 struct Node {
     statics: HashMap<String, Node>,
     param: Option<Box<Node>>,
+    /// A `{name:path}` child: it takes every remaining segment.
+    tail: Option<Box<Node>>,
     methods: Vec<(Method, usize)>,
 }
 
@@ -247,6 +266,7 @@ impl RouterBuilder {
             node = match segment {
                 Segment::Static(text) => node.statics.entry(text.clone()).or_default(),
                 Segment::Param(_) => node.param.get_or_insert_with(Box::default),
+                Segment::Tail(_) => node.tail.get_or_insert_with(Box::default),
             };
         }
         for method in methods {
@@ -389,6 +409,15 @@ fn collect<'a>(
     {
         values.push(segment.clone());
         collect(child, remaining, values, out);
+        values.pop();
+    }
+    // Lowest precedence: the rest of the path (at least one non-empty segment).
+    if let Some(child) = &node.tail
+        && !child.methods.is_empty()
+        && segments.iter().any(|s| !s.is_empty())
+    {
+        values.push(segments.join("/"));
+        out.push((child, values.clone()));
         values.pop();
     }
 }

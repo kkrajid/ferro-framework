@@ -11,6 +11,7 @@ pub mod envelope;
 pub mod headers;
 pub mod method;
 pub mod metrics;
+pub mod multipart;
 pub mod passwords;
 pub mod request;
 pub mod request_id;

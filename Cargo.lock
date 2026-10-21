@@ -669,6 +669,8 @@ dependencies = [
  "argon2",
  "bytes",
  "ferro-shared",
+ "memchr",
+ "percent-encoding",
  "serde_json",
  "tokio",
  "tracing",

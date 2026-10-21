@@ -136,14 +136,21 @@ class TestClient:
         data: dict[str, Any] | None = None,
         content: bytes | str | None = None,
         headers: dict[str, str] | None = None,
+        files: dict[str, Any] | None = None,
     ) -> TestResponse:
         """``json=`` sends JSON, ``data=`` a form, ``content=`` raw bytes (or text as UTF-8)
-        with the ``content-type`` you give in ``headers``."""
+        with the ``content-type`` you give in ``headers``. ``files=`` sends a
+        ``multipart/form-data`` body (with ``data=`` as its text fields): each value is
+        ``bytes``, ``(filename, bytes)``, ``(filename, bytes, content_type)`` or a list of those
+        for several files in one field."""
         if self._address is None:
             raise RuntimeError("use TestClient in a `with` block")
         body: bytes | None = None
         sent = {k.lower(): v for k, v in (headers or {}).items()}
-        if content is not None:
+        if files is not None:
+            body, content_type = _multipart(data or {}, files)
+            sent.setdefault("content-type", content_type)
+        elif content is not None:
             body = content.encode("utf-8") if isinstance(content, str) else bytes(content)
         elif json is not None:
             body = jsonlib.dumps(json).encode()
@@ -240,6 +247,44 @@ class TestClient:
             yield TestStreamResponse(connection.getresponse())
         finally:
             connection.close()
+
+
+def _multipart(data: dict[str, Any], files: dict[str, Any]) -> tuple[bytes, str]:
+    """A ``multipart/form-data`` body and its content type."""
+    boundary = "ferro-test-" + os.urandom(12).hex()
+    out = bytearray()
+
+    def header(name: str, filename: str | None = None, content_type: str | None = None) -> None:
+        quoted = name.replace('"', "%22")
+        out.extend(f"--{boundary}\r\n".encode())
+        disposition = f'form-data; name="{quoted}"'
+        if filename is not None:
+            disposition += '; filename="' + filename.replace('"', "%22") + '"'
+        out.extend(f"Content-Disposition: {disposition}\r\n".encode())
+        if content_type is not None:
+            out.extend(f"Content-Type: {content_type}\r\n".encode())
+        out.extend(b"\r\n")
+
+    for name, value in data.items():
+        for item in value if isinstance(value, list | tuple) else [value]:
+            header(name)
+            out.extend(str(item).encode() + b"\r\n")
+    for name, value in files.items():
+        entries = value if isinstance(value, list) else [value]
+        for entry in entries:
+            if isinstance(entry, bytes | bytearray):
+                filename, payload, content_type = name, bytes(entry), "application/octet-stream"
+            elif len(entry) == 2:
+                filename, payload = entry
+                content_type = "application/octet-stream"
+            else:
+                filename, payload, content_type = entry
+            if hasattr(payload, "read"):
+                payload = payload.read()
+            header(name, filename, content_type)
+            out.extend(bytes(payload) + b"\r\n")
+    out.extend(f"--{boundary}--\r\n".encode())
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
 
 
 def connect_websocket(

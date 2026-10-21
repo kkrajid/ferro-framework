@@ -305,9 +305,17 @@ pub(crate) fn streaming_response(
     Ok(response)
 }
 
+/// A `StreamingResponse`, or a response with a body iterator (`FileResponse` of a large file,
+/// Feature 025).
 pub(crate) fn is_streaming(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     let py = value.py();
-    value.is_instance(types(py)?.streaming_response.bind(py))
+    if value.is_instance(types(py)?.streaming_response.bind(py))? {
+        return Ok(true);
+    }
+    Ok(value.is_instance(types(py)?.response.bind(py))?
+        && value
+            .getattr(intern!(py, "_iterator"))
+            .is_ok_and(|iterator| !iterator.is_none()))
 }
 
 // -- WebSockets --------------------------------------------------------------------------------

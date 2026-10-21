@@ -50,6 +50,11 @@ class RouteRecord:
     rate_limit: str | None = None
     csrf: bool = True
     websocket: bool = False
+    #: Replaces the app-wide ``max_body_size`` for this route (uploads; Feature 025).
+    max_body_size: int | None = None
+    #: Listed in the OpenAPI document (Feature 025).
+    include_in_schema: bool = True
+    tags: tuple[str, ...] = ()
 
 
 def _qualified_name(handler: Callable[..., Any]) -> str:
@@ -235,15 +240,30 @@ class App:
         name: str | None = None,
         rate_limit: str | None = None,
         csrf: bool = True,
+        max_body_size: int | None = None,
+        include_in_schema: bool = True,
+        tags: Iterable[str] = (),
     ) -> Callable[[H], H]:
         """Registers a handler for ``path`` and ``methods``. Returns the handler unchanged.
 
         ``rate_limit`` (``"5/minute"``) replaces the app-wide limit for this route; ``csrf=False``
-        exempts it from the cross-origin check (e.g. webhooks called by other services).
+        exempts it from the cross-origin check (e.g. webhooks called by other services);
+        ``max_body_size`` (bytes) replaces the app-wide body limit, for uploads;
+        ``include_in_schema=False`` leaves it out of the OpenAPI document; ``tags`` group it
+        there. A path's last segment may be ``{name:path}``: the rest of the path.
         """
         normalized = _normalize_methods(path, methods)
         if rate_limit is not None:
             rate_limit = check_rate_limit(rate_limit, f"route {path!r}")
+        if max_body_size is not None and (
+            isinstance(max_body_size, bool)
+            or not isinstance(max_body_size, int)
+            or not 1 <= max_body_size <= 1 << 34
+        ):
+            raise ConfigurationError(
+                f"route {path!r}: max_body_size must be a number of bytes from 1 to 16 GiB"
+            )
+        tags = tuple(tags) if not isinstance(tags, str) else (tags,)
         try:
             params = _ferro.parse_path(path)
         except (ValueError, TypeError) as exc:
@@ -257,7 +277,18 @@ class App:
             handler_name = name or _qualified_name(handler)
             endpoint = build_endpoint(handler, params, handler_name, self._get_executor)
             self._routes.append(
-                RouteRecord(normalized, path, handler, endpoint, handler_name, rate_limit, csrf)
+                RouteRecord(
+                    normalized,
+                    path,
+                    handler,
+                    endpoint,
+                    handler_name,
+                    rate_limit,
+                    csrf,
+                    max_body_size=max_body_size,
+                    include_in_schema=include_in_schema,
+                    tags=tags,
+                )
             )
             return handler
 
@@ -289,7 +320,17 @@ class App:
             handler_name = name or _qualified_name(handler)
             endpoint = build_websocket_endpoint(handler, params, handler_name, self._load_user)
             self._routes.append(
-                RouteRecord(("GET",), path, handler, endpoint, handler_name, rate_limit, csrf, True)
+                RouteRecord(
+                    ("GET",),
+                    path,
+                    handler,
+                    endpoint,
+                    handler_name,
+                    rate_limit,
+                    csrf,
+                    websocket=True,
+                    include_in_schema=False,
+                )
             )
             return handler
 
@@ -316,6 +357,97 @@ class App:
 
     def delete(self, path: str, **options: Any) -> Callable[[H], H]:
         return self.route(path, ["DELETE"], **options)
+
+    # -- files, URLs, documentation (Feature 025) --------------------------------------------
+
+    def static(
+        self,
+        prefix: str,
+        directory: str | Any,
+        *,
+        name: str = "static",
+        html: bool = False,
+        cache_max_age: int | None = 3600,
+    ) -> None:
+        """Serves the files below ``directory`` at ``prefix`` (``app.static("/static",
+        "static")``): conditional requests, ranges, ``Cache-Control: max-age=cache_max_age``.
+        ``url_for("static", path="css/site.css")`` builds their addresses. Behind a proxy or CDN,
+        serving them there is faster still."""
+        from ferro.files import StaticFiles
+
+        prefix = "/" + prefix.strip("/")
+        files = StaticFiles(directory, html=html, cache_max_age=cache_max_age)
+
+        async def serve_static(request, path: str):
+            return await files(request, path)
+
+        self.route(f"{prefix}/{{path:path}}", ["GET"], name=name, include_in_schema=False)(
+            serve_static
+        )
+
+    def url_for(self, name: str, /, **params: Any) -> str:
+        """The path of the route named ``name`` with its path parameters filled in; other
+        ``params`` become the query string. ``url_for("product", id=7, ref="mail")`` →
+        ``/products/7?ref=mail``."""
+        from urllib.parse import quote, urlencode
+
+        record = next((r for r in self._routes if r.name == name), None)
+        if record is None:
+            known = ", ".join(sorted(r.name for r in self._routes)) or "none"
+            raise ConfigurationError(f"url_for(): no route named {name!r}; routes: {known}")
+        path = record.path
+        for placeholder in re.findall(r"\{([A-Za-z_][A-Za-z0-9_]*)(:path)?\}", path):
+            key, tail = placeholder
+            if key not in params:
+                raise ConfigurationError(f"url_for({name!r}): missing path parameter {key!r}")
+            value = str(params.pop(key))
+            encoded = quote(value, safe="/" if tail else "")
+            path = path.replace("{" + key + (":path" if tail else "") + "}", encoded)
+        if params:
+            path += "?" + urlencode(params, doseq=True)
+        return path
+
+    def add_openapi(
+        self,
+        *,
+        title: str = "API",
+        version: str = "0.1.0",
+        description: str | None = None,
+        path: str = "/openapi.json",
+        docs_path: str | None = "/docs",
+    ) -> None:
+        """Serves an OpenAPI 3.1 document of the routes at ``path`` and Swagger UI at
+        ``docs_path`` (``None``: no page). Parameters, Pydantic bodies and response models,
+        uploads and the 422 error format are described from the handlers' signatures."""
+        from ferro.openapi import docs_page, openapi_document
+        from ferro.response import HTMLResponse, JSONResponse
+
+        cached: dict[str, Any] = {}
+
+        async def openapi() -> Any:
+            if "document" not in cached:
+                cached["document"] = openapi_document(
+                    self, title=title, version=version, description=description
+                )
+            return JSONResponse(cached["document"])
+
+        self.route(path, ["GET"], name="openapi", include_in_schema=False)(openapi)
+        if docs_path is not None:
+            page = docs_page(title, path)
+
+            async def docs() -> Any:
+                return HTMLResponse(
+                    page,
+                    headers={
+                        "content-security-policy": (
+                            "default-src 'none'; script-src https://cdn.jsdelivr.net "
+                            "'unsafe-inline'; style-src https://cdn.jsdelivr.net 'unsafe-inline'; "
+                            "img-src 'self' data: https://cdn.jsdelivr.net; connect-src 'self'"
+                        )
+                    },
+                )
+
+            self.route(docs_path, ["GET"], name="docs", include_in_schema=False)(docs)
 
     # -- introspection ----------------------------------------------------------------------
 

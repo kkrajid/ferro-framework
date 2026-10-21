@@ -222,3 +222,38 @@ fn routes_listing() {
     assert_eq!(r.param_names(0), &["x".to_string()]);
     assert!(r.param_names(1).is_empty());
 }
+
+#[test]
+fn tail_segments_take_the_rest_of_the_path() {
+    let r = router(&[
+        (&[Method::Get], "/static/{path:path}"),
+        (&[Method::Get], "/static/special"),
+        (&[Method::Get], "/files/{owner}/{rest:path}"),
+    ]);
+    assert_eq!(
+        found(r.lookup(Method::Get, "/static/css/site.css")),
+        (0, vec![p("path", "css/site.css")])
+    );
+    assert_eq!(found(r.lookup(Method::Get, "/static/special")), (1, vec![]));
+    assert_eq!(
+        found(r.lookup(Method::Get, "/static/a%20b/c%2Fd.txt")),
+        (0, vec![p("path", "a b/c/d.txt")])
+    );
+    assert_eq!(
+        found(r.lookup(Method::Get, "/files/ann/x/y")),
+        (2, vec![p("owner", "ann"), p("rest", "x/y")])
+    );
+    assert_eq!(r.lookup(Method::Get, "/static"), Match::NotFound);
+    assert_eq!(
+        parse_path("/a/{rest:path}").unwrap().param_names(),
+        vec!["rest"]
+    );
+    assert!(matches!(
+        parse_path("/a/{rest:path}/b"),
+        Err(RouteError::InvalidParam { .. })
+    ));
+    assert!(matches!(
+        parse_path("/a/{rest:int}"),
+        Err(RouteError::InvalidParam { .. })
+    ));
+}

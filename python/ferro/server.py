@@ -76,6 +76,7 @@ class ServerRunner:
                     route.rate_limit,
                     route.csrf,
                     route.websocket,
+                    route.max_body_size,
                 )
             )
         try:
@@ -171,6 +172,14 @@ class ServerRunner:
         if self._closed:
             return
         self._closed = True
+        if self._loop_thread.is_alive():
+            # Background tasks of the last requests finish first (Feature 025).
+            from ferro import background
+
+            with contextlib.suppress(Exception):
+                asyncio.run_coroutine_threadsafe(
+                    background.drain(self.settings.shutdown_timeout or None), self._loop
+                ).result((self.settings.shutdown_timeout or 0) + 5)
         if getattr(self, "_started_hooks", False) and self._loop_thread.is_alive():
             self._run_hooks(list(reversed(self.app._shutdown)), startup=False)
         if self._loop_thread.is_alive():

@@ -42,6 +42,9 @@ server — no Gunicorn, Uvicorn or Daphne needed.
     response models from ORM objects, 422 errors
 14. [Signals, on_commit and lifecycle hooks](guide/18-signals-and-hooks.md) — react to saves,
     logins and requests; side effects after commit; startup and shutdown
+15. [Forms, files, dependencies and API docs](guide/19-forms-files-dependencies-openapi.md) —
+    uploads, `Depends`, background tasks, file and static responses, `url_for`, OpenAPI/Swagger,
+    templates
 
 ## Running in production
 

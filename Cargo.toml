@@ -39,6 +39,7 @@ async-channel = "2"
 bytes = "1"
 crossbeam-channel = "0.5"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
+memchr = "2"
 memmap2 = "0.9"
 percent-encoding = "2"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }

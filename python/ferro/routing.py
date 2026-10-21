@@ -9,11 +9,15 @@ and ``str`` annotations (optionally ``X | None``) are converted; failures become
 With Pydantic installed (Feature 019), a parameter annotated with a Pydantic model receives the
 validated request body, and a return annotation that uses Pydantic models converts what the
 handler returns. Ferro never imports Pydantic: a handler annotated with a model already has.
+
+Feature 025 adds ``UploadFile`` parameters (files of a multipart body), the ``Form``,
+``Header`` and ``Cookie`` markers, ``Depends`` and ``BackgroundTasks``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import inspect
@@ -31,10 +35,15 @@ from ferro.exceptions import ConfigurationError, HTTPException, ValidationError
 __all__ = ["ParamSpec", "analyze", "build_endpoint", "build_websocket_endpoint"]
 
 Endpoint = Callable[[Any], Coroutine[Any, Any, Any]]
-Source = Literal["request", "path", "query", "body"]
+Source = Literal[
+    "request", "path", "query", "body", "form", "header", "cookie", "file", "depends", "background"
+]
+# Sources that need the asynchronous endpoint (body, form, dependencies, background tasks).
+_RICH = frozenset({"body", "form", "file", "depends", "background"})
 Problems = list[dict[str, str]]
 
 _FORM = "application/x-www-form-urlencoded"
+_MULTIPART = "multipart/form-data"
 _SEQUENCES = (list, set, frozenset, tuple)
 
 _TRUE = frozenset({"true", "1", "yes", "on"})
@@ -85,6 +94,43 @@ class ParamSpec:
     default: Any
     #: The Pydantic model of a body parameter.
     model: Any = None
+    #: Field, header or cookie name when it differs from the parameter name.
+    alias: str | None = None
+    #: ``list[UploadFile]``: every file of the field.
+    many: bool = False
+    #: The resolved dependency of a ``Depends`` parameter.
+    dependency: Any = None
+
+    @property
+    def key(self) -> str:
+        return self.alias or self.name
+
+
+@dataclass(frozen=True, slots=True)
+class _Dependency:
+    call: Callable[..., Any]
+    specs: list[ParamSpec]
+    extract: Callable[[Any], Any]
+    use_cache: bool
+    kind: str  # "async", "sync", "async_generator", "generator"
+
+
+def _upload_annotation(annotation: Any) -> tuple[bool, bool]:
+    """``(is an upload, many)`` for ``UploadFile``, ``UploadFile | None`` and
+    ``list[UploadFile]``."""
+    from ferro.uploads import UploadFile
+
+    if annotation is UploadFile:
+        return True, False
+    origin = typing.get_origin(annotation)
+    args = typing.get_args(annotation)
+    if origin is typing.Union or origin is types.UnionType:
+        inner = [a for a in args if a is not type(None)]
+        if len(inner) == 1:
+            return _upload_annotation(inner[0])
+    if origin in (list, typing.List) and args == (UploadFile,):  # noqa: UP006
+        return True, True
+    return False, False
 
 
 def _pydantic_model(annotation: Any) -> type | None:
@@ -183,6 +229,10 @@ def analyze(
         if _is_connection(name, annotation, socket):
             specs.append(ParamSpec(name, "request", None, True, None))
             continue
+        special = _special_spec(handler_name, parameter, path_params, socket)
+        if special is not None:
+            specs.append(special)
+            continue
         model = _pydantic_model(annotation)
         if model is not None:
             specs.append(_body_spec(handler_name, parameter, model, specs, path_params, socket))
@@ -202,6 +252,131 @@ def analyze(
                 )
             )
     return specs
+
+
+def _special_spec(
+    handler_name: str, parameter: inspect.Parameter, path_params: list[str], socket: bool
+) -> ParamSpec | None:
+    """Specs for ``Depends``/``Form``/``Header``/``Cookie`` defaults and for ``UploadFile`` and
+    ``BackgroundTasks`` annotations (Feature 025); ``None`` for ordinary parameters."""
+    from ferro.background import BackgroundTasks
+    from ferro.params import Depends, _Marker
+
+    name, annotation, default = parameter.name, parameter.annotation, parameter.default
+    kind = "WebSocket handler" if socket else "handler"
+    if isinstance(default, Depends):
+        if socket:
+            raise ConfigurationError(
+                f"{kind} {handler_name}: Depends() is not supported on WebSocket handlers; "
+                "call the function at the start of the handler"
+            )
+        return ParamSpec(
+            name, "depends", None, True, None, dependency=_dependency(default, path_params)
+        )
+    if annotation is BackgroundTasks:
+        if socket:
+            raise ConfigurationError(
+                f"{kind} {handler_name}: BackgroundTasks is not available on WebSockets; "
+                "start a task with asyncio.create_task()"
+            )
+        return ParamSpec(name, "background", None, True, None)
+    upload, many = _upload_annotation(annotation)
+    if upload:
+        if socket:
+            raise ConfigurationError(f"{kind} {handler_name}: '{name}' cannot be an upload")
+        optional = default is not inspect.Parameter.empty
+        alias = default.alias if isinstance(default, _Marker) else None
+        if isinstance(default, _Marker):
+            optional = not default.required
+        return ParamSpec(name, "file", None, not optional, None, alias=alias, many=many)
+    if isinstance(default, _Marker):
+        if default.source == "form" and socket:
+            raise ConfigurationError(f"{kind} {handler_name}: WebSockets have no form body")
+        if name in path_params:
+            raise ConfigurationError(
+                f"{kind} {handler_name}: path parameter '{name}' cannot use {default!r}"
+            )
+        alias = default.alias
+        if alias is None and default.source == "header":
+            alias = name.replace("_", "-")
+        if default.source == "header":
+            alias = alias.lower()
+        return ParamSpec(
+            name,
+            default.source,  # type: ignore[arg-type]
+            _converter_for(annotation, handler_name, name),
+            default.required,
+            None if default.required else default.default,
+            alias=alias,
+        )
+    return None
+
+
+def _dependency(marker: Any, path_params: list[str]) -> _Dependency:
+    call = marker.dependency
+    label = getattr(call, "__qualname__", repr(call))
+    specs = analyze(call, path_params, f"dependency {label}")
+    for spec in specs:
+        if spec.source in ("body", "form", "file"):
+            raise ConfigurationError(
+                f"dependency {label}: parameter '{spec.name}' reads the request body; "
+                "dependencies take the request, path, query, headers, cookies and other "
+                "dependencies"
+            )
+    if inspect.isasyncgenfunction(call):
+        kind = "async_generator"
+    elif inspect.isgeneratorfunction(call):
+        kind = "generator"
+    elif inspect.iscoroutinefunction(call) or inspect.iscoroutinefunction(
+        getattr(call, "__call__", None)  # noqa: B004 - callable objects
+    ):
+        kind = "async"
+    else:
+        kind = "sync"
+    return _Dependency(call, specs, _extractor(specs, collect=True), marker.use_cache, kind)
+
+
+async def _solve(
+    dependency: _Dependency,
+    request: Any,
+    stack: contextlib.AsyncExitStack,
+    cache: dict[Any, Any],
+    tasks: Any,
+    problems: Problems,
+    get_executor: Callable[[], Executor],
+) -> Any:
+    """The value of a dependency for this request (problems in its parameters are collected;
+    the dependency is then not called)."""
+    if dependency.use_cache and dependency.call in cache:
+        return cache[dependency.call]
+    before = len(problems)
+    kwargs, own = dependency.extract(request)
+    problems.extend(own)
+    for spec in dependency.specs:
+        if spec.source == "depends":
+            kwargs[spec.name] = await _solve(
+                spec.dependency, request, stack, cache, tasks, problems, get_executor
+            )
+        elif spec.source == "background":
+            kwargs[spec.name] = tasks
+    if len(problems) > before:
+        return None
+    call = dependency.call
+    if dependency.kind == "async_generator":
+        value = await stack.enter_async_context(contextlib.asynccontextmanager(call)(**kwargs))
+    elif dependency.kind == "generator":
+        value = stack.enter_context(contextlib.contextmanager(call)(**kwargs))
+    elif dependency.kind == "async":
+        value = await call(**kwargs)
+    else:
+        loop = asyncio.get_running_loop()
+        context = contextvars.copy_context()
+        value = await loop.run_in_executor(
+            get_executor(), context.run, functools.partial(call, **kwargs)
+        )
+    if dependency.use_cache:
+        cache[dependency.call] = value
+    return value
 
 
 def _body_spec(
@@ -268,7 +443,7 @@ def _body_reader(
             for detail in details
         ]
 
-    async def read(request: Any) -> tuple[Any, Problems]:
+    async def read(request: Any, form: Any = None) -> tuple[Any, Problems]:
         body = await request.body()
         if not body:
             if spec.required:
@@ -281,11 +456,16 @@ def _body_reader(
             return spec.default, []
         media = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
         try:
-            if media == _FORM:
-                form = await request.form()
-                data = {
-                    key: form.getlist(key) if key in sequences else form.get(key) for key in form
-                }
+            if media in (_FORM, _MULTIPART):
+                from ferro.uploads import UploadFile
+
+                if form is None:
+                    form = await request.form()
+                data = {}
+                for key in form:
+                    values = [v for v in form.getlist(key) if not isinstance(v, UploadFile)]
+                    if values:
+                        data[key] = values if key in sequences else values[-1]
                 return model.model_validate(data), []
             if media and media != "application/json" and not media.endswith("+json"):
                 raise HTTPException(
@@ -311,9 +491,13 @@ def _extractor(specs: list[ParamSpec], *, collect: bool = False) -> Callable[[An
             if spec.source == "request":
                 kwargs[spec.name] = request
                 continue
-            if spec.source == "body":
+            if spec.source in _RICH:
                 continue
-            if spec.source == "path":
+            if spec.source == "header":
+                raw = request.headers.get(spec.key)
+            elif spec.source == "cookie":
+                raw = request.cookies.get(spec.key)
+            elif spec.source == "path":
                 if path_values is None:
                     path_values = request.path_params
                 raw = path_values.get(spec.name)
@@ -325,7 +509,7 @@ def _extractor(specs: list[ParamSpec], *, collect: bool = False) -> Callable[[An
                 if spec.required:
                     problems.append(
                         {
-                            "param": spec.name,
+                            "param": spec.key,
                             "location": spec.source,
                             "problem": f"missing required {spec.source} parameter",
                         }
@@ -340,7 +524,7 @@ def _extractor(specs: list[ParamSpec], *, collect: bool = False) -> Callable[[An
                 kwargs[spec.name] = spec.converter(raw)
             except _Problem as problem:
                 problems.append(
-                    {"param": spec.name, "location": spec.source, "problem": str(problem)}
+                    {"param": spec.key, "location": spec.source, "problem": str(problem)}
                 )
         if collect:
             return kwargs, problems
@@ -405,31 +589,117 @@ def build_websocket_endpoint(
     return endpoint
 
 
-def _body_endpoint(
+def _form_values(
+    specs: list[ParamSpec], form: Any, kwargs: dict[str, Any], problems: Problems
+) -> None:
+    """Fills ``Form`` and ``UploadFile`` parameters from a parsed form."""
+    from ferro.uploads import UploadFile
+
+    for spec in specs:
+        if spec.source == "file":
+            files = [v for v in form.getlist(spec.key) if isinstance(v, UploadFile)]
+            if not files and spec.required:
+                problems.append(
+                    {"param": spec.key, "location": "form", "problem": "missing required file"}
+                )
+                continue
+            kwargs[spec.name] = files if spec.many else (files[-1] if files else None)
+        elif spec.source == "form":
+            values = [v for v in form.getlist(spec.key) if isinstance(v, str)]
+            if not values:
+                if spec.required:
+                    problems.append(
+                        {
+                            "param": spec.key,
+                            "location": "form",
+                            "problem": "missing required form field",
+                        }
+                    )
+                else:
+                    kwargs[spec.name] = spec.default
+                continue
+            try:
+                raw = values[-1]
+                kwargs[spec.name] = raw if spec.converter is None else spec.converter(raw)
+            except _Problem as problem:
+                problems.append({"param": spec.key, "location": "form", "problem": str(problem)})
+
+
+async def _read_form(request: Any) -> Any:
+    from ferro.uploads import FormData
+
+    body = await request.body()
+    media = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if not body and media not in (_FORM, _MULTIPART):
+        return FormData([])
+    if media not in (_FORM, _MULTIPART):
+        raise HTTPException(
+            415, f"Expected a form body (multipart/form-data or {_FORM}), got {media or 'none'}"
+        )
+    form = await request.form()
+    if not isinstance(form, FormData):
+        form = FormData([(key, value) for key in form for value in form.getlist(key)])
+    return form
+
+
+def _rich_endpoint(
     handler: Callable[..., Any],
     specs: list[ParamSpec],
-    body: ParamSpec,
     get_executor: Callable[[], Executor],
 ) -> Endpoint:
-    """Path/query parameters and the Pydantic body, every problem in one 422 (Feature 019)."""
+    """Handlers with a body, form fields, files, dependencies or background tasks: every
+    problem in one 422 (Features 019 and 025)."""
+    from ferro.background import BackgroundTasks
+
     collect = _extractor(specs, collect=True)
-    read_body = _body_reader(body)
+    body = next((spec for spec in specs if spec.source == "body"), None)
+    read_body = _body_reader(body) if body is not None else None
+    form_specs = [spec for spec in specs if spec.source in ("form", "file")]
+    dependencies = [spec for spec in specs if spec.source == "depends"]
+    background = [spec for spec in specs if spec.source == "background"]
+    uses_tasks = bool(background) or any(_uses_tasks(spec.dependency) for spec in dependencies)
     is_async = inspect.iscoroutinefunction(handler)
 
     async def endpoint(request: Any) -> Any:
         kwargs, problems = collect(request)
-        value, body_problems = await read_body(request)
-        if problems or body_problems:
-            raise ValidationError([*problems, *body_problems])
-        kwargs[body.name] = value
-        if is_async:
-            return await handler(**kwargs)
-        loop = asyncio.get_running_loop()
-        context = contextvars.copy_context()
-        call = functools.partial(handler, **kwargs)
-        return await loop.run_in_executor(get_executor(), context.run, call)
+        form = None
+        if form_specs:
+            form = await _read_form(request)
+            _form_values(form_specs, form, kwargs, problems)
+        if read_body is not None:
+            value, body_problems = await read_body(request, form)
+            problems.extend(body_problems)
+            kwargs[body.name] = value  # type: ignore[union-attr]
+        tasks = BackgroundTasks() if uses_tasks else None
+        for spec in background:
+            kwargs[spec.name] = tasks
+        async with contextlib.AsyncExitStack() as stack:
+            cache: dict[Any, Any] = {}
+            for spec in dependencies:
+                kwargs[spec.name] = await _solve(
+                    spec.dependency, request, stack, cache, tasks, problems, get_executor
+                )
+            if problems:
+                raise ValidationError(problems)
+            if is_async:
+                result = await handler(**kwargs)
+            else:
+                loop = asyncio.get_running_loop()
+                context = contextvars.copy_context()
+                call = functools.partial(handler, **kwargs)
+                result = await loop.run_in_executor(get_executor(), context.run, call)
+        if tasks:
+            tasks.schedule()
+        return result
 
     return endpoint
+
+
+def _uses_tasks(dependency: _Dependency) -> bool:
+    return any(
+        spec.source == "background" or (spec.source == "depends" and _uses_tasks(spec.dependency))
+        for spec in dependency.specs
+    )
 
 
 def _response_adapter(handler: Callable[..., Any], name: str) -> Callable[[Any], Any] | None:
@@ -521,9 +791,8 @@ def _call_endpoint(
     get_executor: Callable[[], Executor],
 ) -> Endpoint:
     specs = analyze(handler, path_params, name)
-    body = next((spec for spec in specs if spec.source == "body"), None)
-    if body is not None:
-        return _body_endpoint(handler, specs, body, get_executor)
+    if any(spec.source in _RICH for spec in specs):
+        return _rich_endpoint(handler, specs, get_executor)
     if not inspect.iscoroutinefunction(handler):
         return _sync_endpoint(handler, specs, get_executor)
 

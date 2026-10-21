@@ -236,13 +236,15 @@ async def test_connections_are_replaced_after_their_lifetime(postgres_server, pa
     db.connect_now(url, pool_size=1)
     try:
         await use_models(Ticket)
-        first = backend_start(postgres_server, name)
-        assert first
+        assert backend_start(postgres_server, name)
         # Never inside a transaction: the connection outlives its limit until the block ends.
+        # (It may be replaced just before the block: it was idle while psql looked.)
         async with transaction():
             await Ticket.objects.create(name="kept")
+            first = backend_start(postgres_server, name)
             await asyncio.sleep(0.5)
             assert await Ticket.objects.count() == 1
+            assert backend_start(postgres_server, name) == first
         assert backend_start(postgres_server, name) == first
         await asyncio.sleep(0.5)
         await _ferro.list_tables()
