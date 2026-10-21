@@ -94,7 +94,8 @@ jobs:
         run: |
           python -m venv /tmp/venv
           if [ -x /tmp/venv/Scripts/python ]; then PY=/tmp/venv/Scripts/python; else PY=/tmp/venv/bin/python; fi
-          "$PY" -m pip install --upgrade pip
+          # pip 26.2.2+: its vendored certifi drops the compromised emSign root.
+          "$PY" -m pip install --upgrade "pip>=26.2.2"
           "$PY" -m pip install --no-index --find-links dist ferro-framework
           "$PY" scripts/smoke_test.py
 

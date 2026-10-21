@@ -8,6 +8,12 @@ and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 
 
 ### Security
 
+- **eMudhra/emSign CA key compromise** (RUSTSEC-2026-0381): PostgreSQL TLS no longer trusts
+  "emSign ECC Root CA - G3", whose intermediate keys are public (`webpki-roots` 1.0.10).
+  Ferro 0.5.0rc2 and earlier trust it when connecting with `sslmode=require`/`verify-full`:
+  upgrade. A test keeps the root out. Development and CI tools now require
+  `certifi>=2026.10.19`, `uv>=0.13.4` and `pip>=26.2.2`.
+
 Follow-up review of Features 018–020 ([docs/security-audit.md](docs/security-audit.md)):
 
 - A PostgreSQL connection lost between two statements of a transaction no longer lets the

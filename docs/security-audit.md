@@ -84,3 +84,13 @@ reloader's bytecode removal, signal handling.
 
 Open item: a streamed response (`StreamingResponse`) to a client that stops reading keeps its
 generator suspended until the connection times out at the TCP level.
+
+## Advisory response — eMudhra/emSign CA keys (2026-10-21)
+
+Eight eMudhra intermediate CA keys were compromised (disclosed 2026-10-20). Ferro's PostgreSQL
+TLS used `webpki-roots` 1.0.9, which still contained "emSign ECC Root CA - G3"; a network
+attacker holding those keys could have impersonated a PostgreSQL server to Ferro 0.5.0rc2 and
+earlier. Fixed by `webpki-roots` 1.0.10, with a unit test that fails if the root returns
+(`crates/postgres/src/tls.rs`). Ferro's HTTP server is not affected (it presents certificates
+and does not verify clients). Tooling: `certifi>=2026.10.19` in the development group,
+`uv>=0.13.4` and `pip>=26.2.2` in CI.

@@ -60,10 +60,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v7
         with:
+          # 0.13.4+: no compromised emSign root in uv's bundled CA store (GHSA-hq85-5cpj-mr62).
+          version: ">=0.13.4"
           cache-dependency-glob: "**/pyproject.toml"
       - uses: Swatinem/rust-cache@v2
       - run: uv venv --python ${{ matrix.python }} .venv
-      - run: uv pip install --python .venv "maturin>=1.15,<2" "pytest>=8" "httpx>=0.27" "ruff>=0.6" "trustme>=1.1" "h2>=4" "pydantic>=2.7,<3"
+      - run: uv pip install --python .venv "maturin>=1.15,<2" "pytest>=8" "httpx>=0.27" "ruff>=0.6" "trustme>=1.1" "h2>=4" "pydantic>=2.7,<3" "certifi>=2026.10.19"
       - run: uv run --python .venv ruff check python tests examples
       - run: uv run --python .venv ruff format --check python tests examples
       - run: uv run --python .venv maturin develop --uv
@@ -100,10 +102,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v7
         with:
+          # 0.13.4+: no compromised emSign root in uv's bundled CA store (GHSA-hq85-5cpj-mr62).
+          version: ">=0.13.4"
           cache-dependency-glob: "**/pyproject.toml"
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - run: uv venv --python 3.13 .venv
-      - run: uv pip install --python .venv "maturin>=1.15,<2" "pytest>=8" "httpx>=0.27"
+      - run: uv pip install --python .venv "maturin>=1.15,<2" "pytest>=8" "httpx>=0.27" "certifi>=2026.10.19"
       - run: uv run --python .venv maturin develop --uv
       - run: uv run --python .venv pytest tests/python/orm -k postgres

@@ -44,3 +44,21 @@ pub(crate) fn connector(config: &PgConfig) -> Result<MakeRustlsConnect, DbError>
         .with_no_client_auth();
     Ok(MakeRustlsConnect::new(tls))
 }
+
+#[cfg(test)]
+mod tests {
+    /// RUSTSEC-2026-0381: eMudhra intermediate CA keys under "emSign ECC Root CA - G3" are
+    /// compromised; webpki-roots 1.0.10 removed that root and it must stay out.
+    #[test]
+    fn the_compromised_emsign_root_is_not_trusted() {
+        let compromised: &[u8] = b"emSign ECC Root CA - G3";
+        let trusted = webpki_roots::TLS_SERVER_ROOTS.iter().any(|anchor| {
+            anchor
+                .subject
+                .as_ref()
+                .windows(compromised.len())
+                .any(|window| window == compromised)
+        });
+        assert!(!trusted, "upgrade webpki-roots to 1.0.10 or later");
+    }
+}
