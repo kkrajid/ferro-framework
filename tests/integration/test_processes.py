@@ -200,7 +200,9 @@ class Visit(models.Model):
         table = "visit"
 
 
-app = App(database_url="sqlite:///visits.db")
+# Two processes write one SQLite file: on a slow runner a writer can wait longer than the
+# default 5 s busy timeout (a POST got an error instead of a pid once on macOS).
+app = App(database_url="sqlite:///visits.db?timeout=60")
 
 
 @app.post("/visits")
@@ -228,16 +230,18 @@ def test_every_worker_uses_the_same_database(tmp_path):
     process, base = start(tmp_path, "--processes", "2", source=DATABASE_APP)
     try:
         wait_ready(base, process, path="/visits")
+
         # One worker answering does not mean the other is ready: a connection the kernel hands
         # to a worker still importing the app waits for it (a 10 s read timed out once on a
         # macOS runner). The timeouts cover a slow start.
         # A new connection per request: a kept-alive connection stays with one worker.
+        def visit(_: int) -> int:
+            response = httpx.post(f"{base}/visits", timeout=90)
+            assert response.status_code == 200, response.text
+            return response.json()["pid"]
+
         with ThreadPoolExecutor(8) as pool:
-            writers = set(
-                pool.map(
-                    lambda _: httpx.post(f"{base}/visits", timeout=60).json()["pid"], range(40)
-                )
-            )
+            writers = set(pool.map(visit, range(40)))
             readers = list(
                 pool.map(lambda _: httpx.get(f"{base}/visits", timeout=60).json(), range(40))
             )

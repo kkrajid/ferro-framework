@@ -288,13 +288,14 @@ fn memory_is_returned_after_a_burst_of_clients() {
         limiter.check(0, address, spec, start).unwrap();
     }
     assert!(limiter.len() > 15_000);
+    // A shard sweeps when a request reaches it: enough later clients that every one of the 16
+    // shards gets some (with 200, one shard got none once on macOS and kept its 1,250 buckets).
     let later = start + Duration::from_secs(3600);
-    for i in 0..200u32 {
-        limiter
-            .check(0, IpAddr::from([11, 0, 0, i as u8]), spec, later)
-            .unwrap();
+    for i in 0..1000u32 {
+        let address = IpAddr::from([11, 0, (i >> 8) as u8, i as u8]);
+        limiter.check(0, address, spec, later).unwrap();
     }
-    assert!(limiter.len() <= 200, "{} buckets left", limiter.len());
+    assert!(limiter.len() <= 1000, "{} buckets left", limiter.len());
 }
 
 // Security review fixes (Feature 017).

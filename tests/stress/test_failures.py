@@ -407,17 +407,18 @@ def test_large_result_sets_do_not_grow_memory(serve, tmp_path, stress_results):
     for _ in range(8):
         counts.append(httpx.get(f"{server.base}/all", timeout=120).json()["n"])
         memory.append(rss_bytes(pid))
-    # The first reads grow the allocator's pools; a leak would keep growing after that.
-    growth = max(memory[2:]) / memory[1] - 1
+    # The first reads grow the allocator's pools (by 10% once on a CI runner: 55.7, 58.7,
+    # 61.7, 64.1, then flat at 64.1-64.6 MiB); a leak keeps growing on every read after that.
+    growth = max(memory[4:]) / memory[3] - 1
     stress_results.record(
         f"Large result set ({rows:,} rows) read 8 times",
         f"memory after each read: {', '.join(f'{m / 2**20:.0f}' for m in memory)} MiB "
-        f"(at most {growth:+.1%} over the second read)",
-        counts == [rows] * 8 and growth <= 0.10,
+        f"(at most {growth:+.1%} over the fourth read)",
+        counts == [rows] * 8 and growth <= 0.05,
     )
     assert counts == [rows] * 8
     series = ", ".join(f"{m / 2**20:.1f}" for m in memory)
-    assert growth <= 0.10, f"memory kept growing: {growth:.1%} (MiB after each read: {series})"
+    assert growth <= 0.05, f"memory kept growing: {growth:.1%} (MiB after each read: {series})"
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
