@@ -66,6 +66,10 @@ Follow-up review of Features 018–020 ([docs/security-audit.md](docs/security-a
 
 ### Fixed
 
+- `ferro run`, `--processes` and `ferro dev` could ignore a stop request (SIGTERM, Ctrl+Break)
+  that arrived while they were logging — about one start in four on Windows when stopped
+  right after the banner: the stop signal was an ordinary exception that logging swallowed.
+- `TestClient.websocket_connect(headers={"host": ...})` sent two `Host` headers.
 - PostgreSQL: inserting a row with an explicit primary key no longer leaves the key sequence
   behind (the next `create()` failed with `IntegrityError`).
 - The e-commerce example inserts an order once, with its total.

@@ -175,3 +175,35 @@ async def test_text_indexes_get_pattern_indexes_in_migrations(database, tmp_path
     await commands.migrate(tmp_path)
     await commands.rollback(tmp_path, to="zero")
     await commands.migrate(tmp_path)
+
+
+async def test_indexes_created_before_pattern_indexes_still_migrate(database, tmp_path):
+    """Databases migrated by Ferro before Feature 021 have text indexes without the `_like`
+    companion: renames, type changes, drops and rollbacks must still work."""
+    from ferro import db
+
+    table = "dm_up"
+    v1 = model("DmUp", {"text": models.String(max_length=20, index=True)}, table=table)
+    commands.make_migrations(tmp_path, models=[v1])
+    assert await commands.migrate(tmp_path) == ["0001_initial"]
+    if database == "postgres":
+        await db.execute('DROP INDEX "dm_up_text_idx_like"')  # as migrated before Feature 021
+    write(tmp_path, 2, "rename", "0001_initial", f"ops.RenameColumn({table!r}, 'text', 'words')")
+    write(
+        tmp_path,
+        3,
+        "retype",
+        "0002_rename",
+        f"ops.AlterColumn({table!r}, ops.Column('words', 'Integer', null=True))",
+    )
+    write(tmp_path, 4, "unindex", "0003_retype", f"ops.DropIndex({table!r}, 'dm_up_words_idx')")
+    applied = await commands.migrate(tmp_path)
+    assert applied == ["0002_rename", "0003_retype", "0004_unindex"]
+    assert await commands.rollback(tmp_path, to="zero") == [
+        "0004_unindex",
+        "0003_retype",
+        "0002_rename",
+        "0001_initial",
+    ]
+    assert table not in await _ferro.list_tables()
+    assert len(await commands.migrate(tmp_path)) == 4

@@ -26,8 +26,10 @@ __all__ = ["ServerRunner", "serve"]
 _WAIT_SLICE = 0.25
 
 
-class _Shutdown(Exception):
-    """Raised in the main thread by SIGTERM/SIGBREAK handlers."""
+class _Shutdown(BaseException):
+    """Raised in the main thread by SIGTERM/SIGBREAK handlers. A ``BaseException``, like
+    ``KeyboardInterrupt``: code that handles ordinary errors (logging handlers catch
+    ``Exception``) must not swallow a stop request."""
 
 
 class ServerRunner:

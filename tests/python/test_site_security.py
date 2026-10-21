@@ -63,3 +63,53 @@ def test_hsts_options(serve):
     )
     with pytest.raises(ConfigurationError, match="hsts_preload"):
         serve(hello(hsts=True, hsts_preload=True, hsts_max_age=600))
+
+
+def test_ipv6_hosts_and_websockets(serve):
+    from ferro.testing import TestClient, WebSocketRejected
+
+    client = serve(hello(allowed_hosts=["[::1]", "example.com"]))
+    assert client.get("/hello", headers={"host": "[::1]:8000"}).status_code == 200
+    assert client.get("/hello", headers={"host": "[::2]"}).status_code == 400
+    app = hello(allowed_hosts=["example.com"])
+
+    @app.websocket("/ws")
+    async def socket(ws):
+        await ws.send("hi")
+
+    with TestClient(app) as test:
+        with test.websocket_connect("/ws", headers={"host": "example.com"}) as ws:
+            assert ws.receive() == "hi"
+        with pytest.raises(WebSocketRejected) as refused:
+            test.websocket_connect("/ws", headers={"host": "evil.com"}).__enter__()
+        assert refused.value.response.status_code == 400
+
+
+def test_no_redirect_when_ferro_serves_https(tmp_path):
+    import ssl
+
+    import httpx
+
+    trustme = pytest.importorskip("trustme")
+    from ferro.config import resolve
+    from ferro.server import ServerRunner
+
+    ca = trustme.CA()
+    issued = ca.issue_cert("localhost", "127.0.0.1")
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert.write_bytes(b"".join(blob.bytes() for blob in issued.cert_chain_pems))
+    issued.private_key_pem.write_to_path(str(key))
+    context = ssl.create_default_context()
+    ca.configure_trust(context)
+    app = hello(https_redirect=True)
+    cli = {"host": "127.0.0.1", "port": 0, "workers": 1, "tls_cert": str(cert), "tls_key": str(key)}
+    runner = ServerRunner(app, resolve(cli=cli, env={}, app=app._settings, mode="run"))
+    _, port = runner.start()
+    try:
+        with httpx.Client(verify=context, timeout=10) as client:
+            response = client.get(f"https://127.0.0.1:{port}/hello")
+        assert response.status_code == 200, "already HTTPS: no redirect loop"
+    finally:
+        runner.stop(graceful=True)
+        runner.wait(10)
+        runner.close()

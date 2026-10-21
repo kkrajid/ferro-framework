@@ -20,3 +20,23 @@ description: "Task list for Feature 024 — Signals, on_commit and Lifecycle Hoo
   concurrent async receivers, so receivers inside one transaction never interleave.
 - **Not done**: signals for bulk operations and cascades (none in Django either); `pre_init`/
   `post_init`; request signals connected after the server started are not wired.
+
+## Verification pass (2026-10-21)
+
+- Release wheel (`maturin build --release`) in its own venv: a smoke script over iterator,
+  expressions, JSON lookups, raw SQL, isolation, `on_commit`, `post_save`, `allowed_hosts` and
+  `on_startup` passed on SQLite and PostgreSQL; the e-commerce integration tests passed against
+  the release build.
+- `save()` overhead with one receiver is within the noise of a committed save
+  ([results](../../tests/benchmarks/results/024-save-overhead.md)).
+- Edge cases added and green on both databases: JSON negative indexes, nested `has_key`,
+  booleans and floats, containment on nested values, Unicode regex, `%%s` in raw SQL,
+  `on_commit` from child tasks, a failing receiver rolling back its transaction, IPv6 hosts,
+  WebSocket handshakes with foreign hosts, no redirect under TLS, database-cache throttle
+  shared by two servers, and migrations of indexes created before pattern indexes.
+- Found and fixed: `TestClient.websocket_connect(headers={"host": ...})` sent two `Host`
+  headers; the given one now replaces the address.
+- Found and fixed (pre-existing since Feature 020): a stop request arriving while the server
+  logged was swallowed by the logging handler (`_Shutdown` derived from `Exception`); 6 of 20
+  probe runs hung, 0 of 40 after making it a `BaseException`
+  (`tests/python/test_stop_signals.py`, red first).

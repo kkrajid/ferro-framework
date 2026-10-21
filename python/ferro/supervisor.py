@@ -31,8 +31,10 @@ class BindError(Exception):
     """The listening address could not be bound (no worker was started)."""
 
 
-class _Shutdown(Exception):
-    pass
+class _Shutdown(BaseException):
+    """Raised in the main thread by SIGTERM/SIGBREAK handlers. A ``BaseException``, like
+    ``KeyboardInterrupt``: code that handles ordinary errors (logging handlers catch
+    ``Exception``) must not swallow a stop request."""
 
 
 def _raise_shutdown(signum: int, frame: object) -> None:

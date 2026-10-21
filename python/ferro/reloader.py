@@ -26,8 +26,10 @@ IGNORED_DIRS = frozenset(
 Snapshot = dict[str, int]
 
 
-class _Shutdown(Exception):
-    pass
+class _Shutdown(BaseException):
+    """Raised in the main thread by SIGTERM/SIGBREAK handlers. A ``BaseException``, like
+    ``KeyboardInterrupt``: code that handles ordinary errors (logging handlers catch
+    ``Exception``) must not swallow a stop request."""
 
 
 def _say(message: str) -> None:

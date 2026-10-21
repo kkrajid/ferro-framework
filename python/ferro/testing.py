@@ -249,15 +249,18 @@ def connect_websocket(
     :class:`WebSocketRejected` when the handshake is refused."""
     sock = socket.create_connection(address, timeout=30)
     key = base64.b64encode(os.urandom(16)).decode()
+    extra = dict(headers or {})
+    # A Host given by the caller replaces the address (one Host header per request).
+    host = next((extra.pop(k) for k in list(extra) if k.lower() == "host"), None)
     lines = [
         f"GET {path} HTTP/1.1",
-        f"Host: {address[0]}:{address[1]}",
+        f"Host: {host or f'{address[0]}:{address[1]}'}",
         "Upgrade: websocket",
         "Connection: Upgrade",
         f"Sec-WebSocket-Key: {key}",
         "Sec-WebSocket-Version: 13",
     ]
-    lines += [f"{k}: {v}" for k, v in (headers or {}).items()]
+    lines += [f"{k}: {v}" for k, v in extra.items()]
     sock.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1"))
     reader = sock.makefile("rb")
     status_line = reader.readline().decode("latin-1")
