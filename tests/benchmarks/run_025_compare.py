@@ -236,6 +236,8 @@ def start(name: str, folder: Path, port: int) -> subprocess.Popen:
             "--log-level",
             "error",
             "--no-access-log",
+            "--http",
+            "httptools",
         ],
         "Flask (waitress)": [
             python,
@@ -254,18 +256,21 @@ def start(name: str, folder: Path, port: int) -> subprocess.Popen:
         else {"start_new_session": True}
     )
     env = {k: v for k, v in os.environ.items() if not k.startswith("FERRO_")}
+    # A file, not a pipe: an unread pipe fills up and blocks a server that logs (waitress
+    # warns about its queue under load).
+    log = folder / f"{name.split()[0].lower()}.log"
     process = subprocess.Popen(
         commands[name],
         cwd=folder,
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stderr=log.open("ab"),
         **flags,
     )
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise RuntimeError(f"{name} exited: {process.stderr.read().decode()[-2000:]}")
+            raise RuntimeError(f"{name} exited: {log.read_text(errors='replace')[-2000:]}")
         try:
             if httpx.get(f"http://127.0.0.1:{port}/hello", timeout=1).status_code == 200:
                 return process
@@ -315,11 +320,18 @@ def run_oha(
     ok = sum(v for k, v in codes.items() if k.startswith("2"))
     total = sum(codes.values())
     percentiles = data.get("latencyPercentiles", {})
+    # Requests still in flight when the run ends are cancelled by oha, not failed by the server.
+    errors = {
+        kind: count
+        for kind, count in data.get("errorDistribution", {}).items()
+        if "deadline" not in kind
+    }
     return {
-        "rps": data["summary"]["requestsPerSec"],
+        "rps": ok / data["summary"]["total"],
         "p50": (percentiles.get("p50") or 0) * 1000,
         "p99": (percentiles.get("p99") or 0) * 1000,
-        "failed": total - ok + sum(data.get("errorDistribution", {}).values()),
+        "failed": total - ok + sum(errors.values()),
+        "errors": errors,
     }
 
 
@@ -372,7 +384,7 @@ def main() -> int:
         "",
         f"Ferro {version('ferro-framework')} ({native.BUILD_PROFILE} build, "
         "`ferro run --workers 4`, 1 process); "
-        f"FastAPI {version('fastapi')} on uvicorn {version('uvicorn')} (1 worker); "
+        f"FastAPI {version('fastapi')} on uvicorn {version('uvicorn')} (1 worker, httptools); "
         f"Flask {version('flask')} on waitress {version('waitress')} (8 threads). "
         "Database scenario: Ferro's ORM; FastAPI and Flask with `sqlite3` directly (no ORM).",
         "",

@@ -416,7 +416,8 @@ def test_large_result_sets_do_not_grow_memory(serve, tmp_path, stress_results):
         counts == [rows] * 8 and growth <= 0.10,
     )
     assert counts == [rows] * 8
-    assert growth <= 0.10, f"memory kept growing: {growth:.1%}"
+    series = ", ".join(f"{m / 2**20:.1f}" for m in memory)
+    assert growth <= 0.10, f"memory kept growing: {growth:.1%} (MiB after each read: {series})"
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
