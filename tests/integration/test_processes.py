@@ -96,17 +96,17 @@ def interrupt(process: subprocess.Popen) -> None:
 
 
 def pids(base: str, count: int = 300) -> set[int]:
-    """Process ids answering `count` CPU-bound requests. A fresh connection per request lets
-    every worker accept some (keep-alive connections stay with one worker, and macOS hands most
-    connections of a shared socket to one process); no client is shared between threads (that
-    failed on Windows with WinError 10038). The timeout allows for queued requests on slow CI
-    runners."""
+    """Process ids answering `count` CPU-bound requests from 32 threads sharing one client (the
+    form that was stable on every runner). A client-side read error (Windows reported WinError
+    10038 once, with no server error) is retried once; timeouts are not."""
+    with ThreadPoolExecutor(32) as pool, httpx.Client(timeout=10) as client:
 
-    def get(_: int) -> int:
-        response = httpx.get(f"{base}/burn", timeout=30, headers={"connection": "close"})
-        return response.json()["pid"]
+        def get(_: int) -> int:
+            try:
+                return client.get(f"{base}/burn").json()["pid"]
+            except httpx.ReadError:
+                return client.get(f"{base}/burn").json()["pid"]
 
-    with ThreadPoolExecutor(16) as pool:
         return set(pool.map(get, range(count)))
 
 
