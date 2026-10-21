@@ -7,6 +7,7 @@ import asyncio
 import getpass
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 import sys
@@ -181,6 +182,19 @@ def _parser() -> argparse.ArgumentParser:
     migration = commands.add_parser("migration", help="migration information")
     migration_commands = migration.add_subparsers(dest="migration_command", required=True)
     migration_options(migration_commands.add_parser("status", help="list migrations"))
+
+    jobs = commands.add_parser("jobs", help="durable background jobs (ferro.jobs)")
+    jobs_commands = jobs.add_subparsers(dest="jobs_command", required=True)
+    worker = jobs_commands.add_parser("worker", help="run queued jobs until stopped")
+    worker.add_argument("target", nargs="?", default=DEFAULT_TARGET, help="module:attribute")
+    worker.add_argument("--database-url", dest="database_url", metavar="URL")
+    worker.add_argument(
+        "--queue", action="append", dest="queues", metavar="NAME", help="repeatable; default"
+    )
+    worker.add_argument("--concurrency", type=int, default=4, metavar="N")
+    worker.add_argument("--poll-interval", type=float, default=1.0, metavar="SECONDS")
+    worker.add_argument("--visibility-timeout", type=float, default=300.0, metavar="SECONDS")
+    worker.add_argument("--burst", action="store_true", help="exit when no job is due")
 
     superuser = commands.add_parser("createsuperuser", help="create an admin user")
     superuser.add_argument("target", nargs="?", default=DEFAULT_TARGET, help="module:attribute")
@@ -540,6 +554,66 @@ def _create_tables(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _jobs_worker(args: argparse.Namespace) -> int:
+    """``ferro jobs worker``: the app's startup hooks, then jobs until Ctrl+C or SIGTERM (the
+    running jobs finish first), then the shutdown hooks."""
+    import signal
+
+    from ferro import db, jobs
+
+    app = load_app(args.target)
+    settings = resolve(cli={"database_url": args.database_url}, app=app._settings, mode="run")
+    if settings.database_url is None:
+        raise ConfigurationError(
+            "no database URL; pass --database-url, set FERRO_DATABASE_URL "
+            "or use App(database_url=...)"
+        )
+    queues = args.queues or ["default"]
+
+    async def hooks(functions: list[Any]) -> None:
+        for function in functions:
+            result = function()
+            if inspect.isawaitable(result):
+                await result
+
+    async def run() -> int:
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+
+        def request_stop(*_: Any) -> None:
+            loop.call_soon_threadsafe(stop.set)
+
+        previous = {
+            number: signal.signal(number, request_stop)
+            for number in (signal.SIGINT, signal.SIGTERM)
+        }
+        await db.connect(settings.database_url)
+        try:
+            await hooks(app._startup)
+            print(
+                f"ferro jobs worker: queues {', '.join(queues)}, concurrency {args.concurrency}",
+                file=sys.stderr,
+                flush=True,
+            )
+            done = await jobs.run_worker(
+                queues,
+                concurrency=args.concurrency,
+                poll_interval=args.poll_interval,
+                visibility_timeout=args.visibility_timeout,
+                burst=args.burst,
+                stop=stop,
+            )
+            print(f"ferro jobs worker: stopped after {done} job(s)", file=sys.stderr, flush=True)
+            await hooks(list(reversed(app._shutdown)))
+            return EXIT_OK
+        finally:
+            for number, handler in previous.items():
+                signal.signal(number, handler)
+            await db.disconnect()
+
+    return asyncio.run(run())
+
+
 def _sequence_reset(args: argparse.Namespace) -> int:
     from ferro import db
 
@@ -675,6 +749,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return _migration_status(args)
         if args.command == "createsuperuser":
             return _createsuperuser(args)
+        if args.command == "jobs":
+            return _jobs_worker(args)
         if args.command == "dev" and args.reload:
             from ferro.reloader import run_with_reload
 

@@ -336,6 +336,26 @@ def _dependency(marker: Any, path_params: list[str]) -> _Dependency:
     return _Dependency(call, specs, _extractor(specs, collect=True), marker.use_cache, kind)
 
 
+_OVERRIDDEN: dict[tuple[Any, bool, tuple[str, ...]], _Dependency] = {}
+
+
+def _override(
+    dependency: _Dependency, overrides: dict[Any, Any] | None, path_params: list[str]
+) -> _Dependency:
+    """The dependency to run in place of ``dependency`` (``app.dependency_overrides``)."""
+    if not overrides or dependency.call not in overrides:
+        return dependency
+    replacement = overrides[dependency.call]
+    key = (replacement, dependency.use_cache, tuple(path_params))
+    resolved = _OVERRIDDEN.get(key)
+    if resolved is None:
+        from ferro.params import Depends
+
+        resolved = _dependency(Depends(replacement, use_cache=dependency.use_cache), path_params)
+        _OVERRIDDEN[key] = resolved
+    return resolved
+
+
 async def _solve(
     dependency: _Dependency,
     request: Any,
@@ -344,18 +364,31 @@ async def _solve(
     tasks: Any,
     problems: Problems,
     get_executor: Callable[[], Executor],
+    overrides: dict[Any, Any] | None = None,
+    path_params: list[str] | None = None,
 ) -> Any:
     """The value of a dependency for this request (problems in its parameters are collected;
-    the dependency is then not called)."""
+    the dependency is then not called). Results are cached under the original function, so an
+    override used twice also runs once."""
     if dependency.use_cache and dependency.call in cache:
         return cache[dependency.call]
+    original = dependency.call
+    dependency = _override(dependency, overrides, path_params or [])
     before = len(problems)
     kwargs, own = dependency.extract(request)
     problems.extend(own)
     for spec in dependency.specs:
         if spec.source == "depends":
             kwargs[spec.name] = await _solve(
-                spec.dependency, request, stack, cache, tasks, problems, get_executor
+                spec.dependency,
+                request,
+                stack,
+                cache,
+                tasks,
+                problems,
+                get_executor,
+                overrides,
+                path_params,
             )
         elif spec.source == "background":
             kwargs[spec.name] = tasks
@@ -375,7 +408,7 @@ async def _solve(
             get_executor(), context.run, functools.partial(call, **kwargs)
         )
     if dependency.use_cache:
-        cache[dependency.call] = value
+        cache[original] = value
     return value
 
 
@@ -646,6 +679,8 @@ def _rich_endpoint(
     handler: Callable[..., Any],
     specs: list[ParamSpec],
     get_executor: Callable[[], Executor],
+    overrides: dict[Any, Any] | None = None,
+    path_params: list[str] | None = None,
 ) -> Endpoint:
     """Handlers with a body, form fields, files, dependencies or background tasks: every
     problem in one 422 (Features 019 and 025)."""
@@ -677,7 +712,15 @@ def _rich_endpoint(
             cache: dict[Any, Any] = {}
             for spec in dependencies:
                 kwargs[spec.name] = await _solve(
-                    spec.dependency, request, stack, cache, tasks, problems, get_executor
+                    spec.dependency,
+                    request,
+                    stack,
+                    cache,
+                    tasks,
+                    problems,
+                    get_executor,
+                    overrides,
+                    path_params,
                 )
             if problems:
                 raise ValidationError(problems)
@@ -772,14 +815,29 @@ def build_endpoint(
     path_params: list[str],
     name: str,
     get_executor: Callable[[], Executor],
+    overrides: dict[Any, Any] | None = None,
+    status_code: int | None = None,
 ) -> Endpoint:
-    endpoint = _call_endpoint(handler, path_params, name, get_executor)
+    """``overrides`` is the app's ``dependency_overrides`` (read at each request);
+    ``status_code`` is the status of results that are not ``Response`` objects."""
+    endpoint = _call_endpoint(handler, path_params, name, get_executor, overrides)
     respond = _response_adapter(handler, name)
-    if respond is None:
+    if respond is None and status_code is None:
         return endpoint
+    from ferro.response import Response
 
     async def converted(request: Any) -> Any:
-        return respond(await endpoint(request))
+        result = await endpoint(request)
+        if isinstance(result, Response):
+            return result  # the handler chose its status
+        if respond is not None:
+            result = respond(result)
+        if status_code is None:
+            return result
+        if isinstance(result, Response):
+            result.status = status_code
+            return result
+        return Response(None if status_code == 204 else result, status=status_code)
 
     return converted
 
@@ -789,10 +847,11 @@ def _call_endpoint(
     path_params: list[str],
     name: str,
     get_executor: Callable[[], Executor],
+    overrides: dict[Any, Any] | None = None,
 ) -> Endpoint:
     specs = analyze(handler, path_params, name)
     if any(spec.source in _RICH for spec in specs):
-        return _rich_endpoint(handler, specs, get_executor)
+        return _rich_endpoint(handler, specs, get_executor, overrides, path_params)
     if not inspect.iscoroutinefunction(handler):
         return _sync_endpoint(handler, specs, get_executor)
 

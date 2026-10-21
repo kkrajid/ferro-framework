@@ -694,6 +694,7 @@ dependencies = [
  "bytes",
  "ferro-core",
  "ferro-router",
+ "ferro-shared",
  "futures-util",
  "rcgen",
  "rustls",

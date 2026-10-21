@@ -63,6 +63,8 @@ def _guard(
             await check(kwargs["request"])
             return await handler(*args, **kwargs)
 
+        # The OpenAPI document lists the session cookie as this route's security (Feature 026).
+        guarded.__ferro_security__ = ("session",)  # type: ignore[attr-defined]
         return guarded
 
     return wrap

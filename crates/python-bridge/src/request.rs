@@ -2,6 +2,7 @@
 
 use std::sync::{Mutex, OnceLock};
 
+use bytes::Bytes;
 use ferro_core::FerroRequest;
 use percent_encoding::percent_decode_str;
 use pyo3::exceptions::{PyKeyError, PyStopIteration};
@@ -67,7 +68,7 @@ fn upload_types(py: Python<'_>) -> PyResult<&(Py<PyAny>, Py<PyAny>)> {
 
 /// A `multipart/form-data` body as `ferro.uploads.FormData`: text fields as `str`, file parts
 /// (those with a filename) as `UploadFile` (Feature 025).
-fn multipart_form(py: Python<'_>, body: &[u8], content_type: &str) -> PyResult<Py<PyAny>> {
+fn multipart_form(py: Python<'_>, body: &Bytes, content_type: &str) -> PyResult<Py<PyAny>> {
     let boundary = ferro_core::multipart::boundary(content_type)
         .ok_or_else(|| bad_request(py, "Malformed multipart body: missing boundary".into()))?;
     let parts = ferro_core::multipart::parse(body, &boundary, Default::default())
@@ -87,7 +88,9 @@ fn multipart_form(py: Python<'_>, body: &[u8], content_type: &str) -> PyResult<P
                     filename.as_str(),
                     part.content_type.as_deref(),
                     headers,
-                    PyBytes::new(py, data),
+                    BodySlice {
+                        data: body.slice(part.data.clone()),
+                    },
                 ))?
             }
             None => {
@@ -123,6 +126,37 @@ fn bad_request(py: Python<'_>, message: String) -> PyErr {
     match types(py).and_then(|t| t.http_exception.bind(py).call1((400, message))) {
         Ok(exception) => PyErr::from_value(exception),
         Err(err) => err,
+    }
+}
+
+/// The bytes of one uploaded file, without a copy: a view of the request body, which for a
+/// large body is a map of its temporary file (Feature 026). `UploadFile` reads it in pieces.
+#[pyclass(module = "ferro._ferro", frozen)]
+pub struct BodySlice {
+    data: Bytes,
+}
+
+impl std::fmt::Debug for BodySlice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BodySlice({} bytes)", self.data.len())
+    }
+}
+
+#[pymethods]
+impl BodySlice {
+    fn __len__(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Up to `size` bytes from `offset` (all the rest when `size` is negative).
+    #[pyo3(signature = (offset = 0, size = -1))]
+    fn read<'py>(&self, py: Python<'py>, offset: usize, size: isize) -> Bound<'py, PyBytes> {
+        let start = offset.min(self.data.len());
+        let end = match usize::try_from(size) {
+            Ok(size) => start.saturating_add(size).min(self.data.len()),
+            Err(_) => self.data.len(),
+        };
+        PyBytes::new(py, &self.data[start..end])
     }
 }
 

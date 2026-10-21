@@ -35,7 +35,13 @@ PUBLIC = {
     ],
     "ferro.db": [
         "DatabaseUnavailableError", "TransactionError", "connect", "create_tables", "disconnect",
-        "execute", "fetch", "is_connected", "on_commit", "reset_sequences", "transaction",
+        "execute", "fetch", "is_connected", "on_commit", "request_transaction",
+        "reset_sequences", "transaction",
+    ],
+    "ferro.jobs": ["Job", "Task", "enqueue", "retry", "run_worker", "task"],
+    "ferro.security": [
+        "APIKeyCookie", "APIKeyHeader", "APIKeyQuery", "CORS", "HTTPBasic", "HTTPBearer",
+        "SecurityScheme",
     ],
     "ferro.auth": [
         "AnonymousUser", "Group", "LoginThrottled", "PasswordError", "Permission", "Session",

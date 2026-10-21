@@ -28,7 +28,9 @@ may change behaviour in a patch release, documented in the changelog under "Secu
 | `ferro` | `App`, `Request`, `Response`, `JSONResponse`, `HTMLResponse`, `PlainTextResponse`, `RedirectResponse`, `FileResponse`, `StreamingResponse`, `EventStream`, `ServerSentEvent`, `UploadFile`, `FormData`, `Depends`, `Form`, `Header`, `Cookie`, `BackgroundTasks`, `WebSocket`, `WebSocketDisconnect`, `HTTPException`, `ValidationError`, `ConfigurationError`, `CORS`, `__version__` |
 | `ferro.templating` | `Templates` |
 | `ferro.models` | `Model`, `Field` and the field classes (`String`, `Text`, `Integer`, `BigInteger`, `Float`, `Decimal`, `Boolean`, `Date`, `DateTime`, `Time`, `UUID`, `JSON`), relations (`ForeignKey`, `OneToOne`, `ManyToMany`, `CASCADE`, `SET_NULL`, `PROTECT`, `DO_NOTHING`), `QuerySet`, `Q`, `F`, aggregates (`Count`, `Sum`, `Avg`, `Min`, `Max`), expressions (`Value`, `Func`, `Lower`, `Upper`, `Trim`, `Length`, `Abs`, `Concat`, `Coalesce`, `Greatest`, `Least`, `Now`, `Case`, `When`, `Subquery`, `Exists`, `OuterRef`), `prefetch_related_objects`, exceptions (`FieldError`, `DatabaseError`, `IntegrityError`, `ProtectedError`, `OperationalError`, `DatabaseUnavailableError`, `TransactionError`, `ObjectDoesNotExist`, `MultipleObjectsReturned`, `RelatedNotLoaded`) |
-| `ferro.db` | `connect`, `disconnect`, `is_connected`, `create_tables`, `transaction`, `on_commit`, `execute`, `fetch`, `reset_sequences`, `DatabaseUnavailableError`, `TransactionError` |
+| `ferro.db` | `connect`, `disconnect`, `is_connected`, `create_tables`, `transaction`, `request_transaction`, `on_commit`, `execute`, `fetch`, `reset_sequences`, `DatabaseUnavailableError`, `TransactionError` |
+| `ferro.jobs` | `task`, `Task`, `enqueue`, `retry`, `run_worker`, `Job` (the `ferro_job` table) |
+| `ferro.security` | `CORS`, security scheme dependencies (`SecurityScheme`, `HTTPBearer`, `HTTPBasic`, `APIKeyHeader`, `APIKeyQuery`, `APIKeyCookie`) |
 | `ferro.auth` | `User`, `Group`, `Permission`, `Session`, `AnonymousUser`, `authenticate`, `login`, `logout`, `login_required`, `staff_required`, `permission_required`, `auth_middleware`, `make_password`, `validate_password`, `PasswordError`, `create_permissions`, `LoginThrottled` |
 | `ferro.admin` | `admin`, `AdminSite`, `ModelAdmin` |
 | `ferro.signals` | `Signal`, `receiver` and the built-in signals (`pre_save`, `post_save`, `pre_delete`, `post_delete`, `m2m_changed`, `request_started`, `request_finished`, `got_request_exception`, `user_logged_in`, `user_logged_out`, `user_login_failed`, `post_migrate`) |
@@ -46,7 +48,7 @@ too: model-annotated body parameters, return-annotation response models, models 
 wherever JSON is written, and the `ferro-framework[pydantic]` extra.
 
 **Command line**: `ferro new`, `dev`, `run`, `routes`, `shell`, `db create-tables`, `db shell`,
-`makemigrations`, `migrate`, `rollback`, `migration status`, `createsuperuser`, their documented
+`makemigrations`, `migrate`, `rollback`, `migration status`, `createsuperuser`, `jobs worker`, their documented
 options and the exit codes (0, 1, 2, 3).
 
 **Settings**: every setting in the guide's settings table, with its option, environment variable

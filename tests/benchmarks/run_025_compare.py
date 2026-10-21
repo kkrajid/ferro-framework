@@ -4,10 +4,14 @@ Needs a venv with the Ferro release wheel plus ``fastapi uvicorn flask waitress 
 ``oha`` on PATH. Run with that venv's Python from any folder:
 
     python tests/benchmarks/run_025_compare.py [--seconds 10] [--rounds 3] [--connections 50]
+        [--output FILE] [--uvloop]
 
 Each scenario runs against each server in turn (rounds interleaved), one process per server,
-with the client on the same machine; medians are reported. Writes
-tests/benchmarks/results/025-compare.md. Only the processes this script started are stopped.
+with the client on the same machine; medians are reported, with the latency distribution
+(p50/p90/p99/p99.9) and the hardware. Writes tests/benchmarks/results/025-compare.md (or
+``--output``) plus the raw runs as JSON next to it. ``--uvloop`` runs uvicorn with uvloop
+(Linux and macOS; install it first). The GitHub workflow ``benchmark.yml`` runs this on a
+fresh runner (Feature 026). Only the processes this script started are stopped.
 """
 
 from __future__ import annotations
@@ -29,6 +33,36 @@ from pathlib import Path
 import httpx
 
 RESULTS = Path(__file__).resolve().parent / "results" / "025-compare.md"
+UVLOOP = False
+
+
+def hardware() -> str:
+    """CPU model, logical CPUs and memory, as far as the platform tells."""
+    model = platform.processor() or platform.machine()
+    memory = ""
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text(errors="replace").splitlines():
+            if line.startswith("model name"):
+                model = line.split(":", 1)[1].strip()
+                break
+    meminfo = Path("/proc/meminfo")
+    if meminfo.exists():
+        for line in meminfo.read_text(errors="replace").splitlines():
+            if line.startswith("MemTotal"):
+                memory = f", {int(line.split()[1]) / 1024 / 1024:.1f} GiB RAM"
+                break
+    if sys.platform == "darwin":
+        found = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string", "hw.memsize"],
+            capture_output=True,
+            text=True,
+        ).stdout.split("\n")
+        if len(found) >= 2 and found[1].strip().isdigit():
+            model = found[0].strip() or model
+            memory = f", {int(found[1]) / 1024**3:.1f} GiB RAM"
+    return f"{model}, {os.cpu_count()} logical CPUs{memory}"
+
 
 FERRO = """
 import sqlite3, threading
@@ -238,6 +272,7 @@ def start(name: str, folder: Path, port: int) -> subprocess.Popen:
             "--no-access-log",
             "--http",
             "httptools",
+            *(["--loop", "uvloop"] if UVLOOP else []),
         ],
         "Flask (waitress)": [
             python,
@@ -329,7 +364,9 @@ def run_oha(
     return {
         "rps": ok / data["summary"]["total"],
         "p50": (percentiles.get("p50") or 0) * 1000,
+        "p90": (percentiles.get("p90") or 0) * 1000,
         "p99": (percentiles.get("p99") or 0) * 1000,
+        "p999": (percentiles.get("p99.9") or 0) * 1000,
         "failed": total - ok + sum(errors.values()),
         "errors": errors,
     }
@@ -340,7 +377,11 @@ def main() -> int:
     parser.add_argument("--seconds", type=int, default=10)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--connections", type=int, default=50)
+    parser.add_argument("--output", type=Path, default=RESULTS)
+    parser.add_argument("--uvloop", action="store_true", help="uvicorn with uvloop")
     args = parser.parse_args()
+    global UVLOOP
+    UVLOOP = args.uvloop
     import ferro._ferro as native
 
     if native.BUILD_PROFILE != "release":
@@ -376,34 +417,42 @@ def main() -> int:
     lines = [
         "# Feature 025: Ferro vs FastAPI vs Flask",
         "",
-        f"Measured {datetime.now(UTC):%Y-%m-%d %H:%M} UTC on {platform.platform()}, "
-        f"{os.cpu_count()} logical CPUs, CPython {platform.python_version()}; oha "
+        f"Measured {datetime.now(UTC):%Y-%m-%d %H:%M} UTC on {platform.platform()} "
+        f"({hardware()}), CPython {platform.python_version()}; oha "
         f"{args.connections} connections, {args.seconds} s per run after a warm-up, "
         f"{args.rounds} rounds (servers alternating); medians. Client and servers share the "
         "machine.",
         "",
         f"Ferro {version('ferro-framework')} ({native.BUILD_PROFILE} build, "
         "`ferro run --workers 4`, 1 process); "
-        f"FastAPI {version('fastapi')} on uvicorn {version('uvicorn')} (1 worker, httptools); "
+        f"FastAPI {version('fastapi')} on uvicorn {version('uvicorn')} (1 worker, httptools"
+        f"{', uvloop ' + version('uvloop') if UVLOOP else ', asyncio loop'}); "
         f"Flask {version('flask')} on waitress {version('waitress')} (8 threads). "
         "Database scenario: Ferro's ORM; FastAPI and Flask with `sqlite3` directly (no ORM).",
         "",
-        "| Scenario | Server | req/s | p50 ms | p99 ms | failed | vs FastAPI |",
-        "|---|---|---|---|---|---|---|",
+        "| Scenario | Server | req/s | p50 ms | p90 ms | p99 ms | p99.9 ms | failed | vs FastAPI |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for label, *_ in SCENARIOS:
         base = statistics.median(r["rps"] for r in results[(label, "FastAPI (uvicorn)")])
         for name in servers:
             runs = results[(label, name)]
             rps = statistics.median(r["rps"] for r in runs)
-            p50 = statistics.median(r["p50"] for r in runs)
-            p99 = statistics.median(r["p99"] for r in runs)
+            latency = {
+                key: statistics.median(r[key] for r in runs)
+                for key in ("p50", "p90", "p99", "p999")
+            }
             failed = sum(r["failed"] for r in runs)
             lines.append(
-                f"| {label} | {name} | {rps:,.0f} | {p50:.2f} | {p99:.2f} | {failed} "
-                f"| {rps / base:.2f}x |"
+                f"| {label} | {name} | {rps:,.0f} | {latency['p50']:.2f} | {latency['p90']:.2f} "
+                f"| {latency['p99']:.2f} | {latency['p999']:.2f} | {failed} | {rps / base:.2f}x |"
             )
-    RESULTS.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    raw = [
+        {"scenario": label, "server": name, "runs": runs} for (label, name), runs in results.items()
+    ]
+    args.output.with_suffix(".json").write_text(json.dumps(raw, indent=2), encoding="utf-8")
     print("\n".join(lines))
     return 0
 

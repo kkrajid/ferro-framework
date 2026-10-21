@@ -40,6 +40,7 @@ fn _ferro(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<request::QueryParams>()?;
     m.add_class::<request::Headers>()?;
     m.add_class::<request::Ready>()?;
+    m.add_class::<request::BodySlice>()?;
     m.add_class::<server::Server>()?;
     m.add_class::<realtime::Socket>()?;
     m.add_class::<realtime::BroadcastListener>()?;

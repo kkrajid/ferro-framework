@@ -12,6 +12,7 @@ mod server;
 mod service;
 mod snapshots;
 mod socket;
+mod spool;
 mod tls;
 
 pub use lifecycle::ShutdownStats;

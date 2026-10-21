@@ -3,6 +3,9 @@
 The document is built from what the handlers declare: path, query, header and cookie
 parameters with their types and defaults, Pydantic bodies, form fields and uploads, return
 annotations with Pydantic models, and the 422 error format of :class:`ValidationError`.
+Feature 026 adds security schemes (``HTTPBearer``, ``APIKeyHeader``... used as dependencies,
+and the session cookie of ``login_required``) and the route metadata (``summary``,
+``description``, ``status_code``, ``responses``, ``deprecated``, ``operation_id``).
 """
 
 from __future__ import annotations
@@ -105,6 +108,35 @@ _ERROR = {
 }
 
 
+def _schemes(specs: list[Any], found: list[Any]) -> list[Any]:
+    """The security schemes among the dependencies (nested ones included), in order."""
+    from ferro.security import SecurityScheme
+
+    for spec in specs:
+        if spec.source != "depends":
+            continue
+        call = spec.dependency.call
+        if isinstance(call, SecurityScheme):
+            if all(call.scheme_name != other.scheme_name for other in found):
+                found.append(call)
+        else:
+            _schemes(spec.dependency.specs, found)
+    return found
+
+
+def _response(value: Any, components: dict[str, Any]) -> dict[str, Any]:
+    """A ``responses={...}`` entry: a description, or a dict that may name a Pydantic
+    ``model``."""
+    if isinstance(value, str):
+        return {"description": value}
+    entry = dict(value)
+    model = entry.pop("model", None)
+    entry.setdefault("description", "Response")
+    if model is not None:
+        entry["content"] = {"application/json": {"schema": _body_model(model, components)}}
+    return entry
+
+
 def _flatten(specs: list[Any]) -> list[Any]:
     """The handler's parameters plus those its dependencies read from the request."""
     out = []
@@ -116,22 +148,36 @@ def _flatten(specs: list[Any]) -> list[Any]:
     return out
 
 
-def _operation(record: Any, components: dict[str, Any]) -> dict[str, Any]:
+def _operation(record: Any, components: dict[str, Any], security: dict[str, Any]) -> dict[str, Any]:
     from ferro.routing import analyze
 
     names = _ferro.parse_path(record.path)
-    specs = _flatten(analyze(record.handler, names, record.name))
+    analyzed = analyze(record.handler, names, record.name)
+    specs = _flatten(analyzed)
     doc = inspect.getdoc(record.handler) or ""
     summary, _, description = doc.partition("\n")
     short = record.name.rsplit(".", 1)[-1].replace("_", " ").strip()
     operation: dict[str, Any] = {
-        "operationId": re.sub(r"[^A-Za-z0-9_]", "_", record.name),
-        "summary": summary.strip() or short.capitalize(),
+        "operationId": record.operation_id or re.sub(r"[^A-Za-z0-9_]", "_", record.name),
+        "summary": record.summary or summary.strip() or short.capitalize(),
     }
-    if description.strip():
-        operation["description"] = description.strip()
+    description = record.description or description.strip()
+    if description:
+        operation["description"] = description
     if record.tags:
         operation["tags"] = list(record.tags)
+    if record.deprecated:
+        operation["deprecated"] = True
+    schemes = _schemes(analyzed, [])
+    if "session" in getattr(record.handler, "__ferro_security__", ()):
+        from ferro.security import SESSION_COOKIE
+
+        if all(scheme.scheme_name != "session" for scheme in schemes):
+            schemes.append(SESSION_COOKIE)
+    if schemes:
+        for scheme in schemes:
+            security.setdefault(scheme.scheme_name, scheme.openapi())
+        operation["security"] = [{scheme.scheme_name: [] for scheme in schemes}]
     parameters = []
     seen = set()
     for spec in specs:
@@ -185,11 +231,16 @@ def _operation(record: Any, components: dict[str, Any]) -> dict[str, Any]:
             "content": content,
         }
     success: dict[str, Any] = {"description": "Successful response"}
+    status = record.status_code or 200
     returned = _return_schema(record.handler, components)
-    if returned is not None:
+    if returned is not None and status != 204:
         success["content"] = {"application/json": {"schema": returned}}
-    responses: dict[str, Any] = {"200": success}
-    if any(spec.source != "request" for spec in specs):
+    responses: dict[str, Any] = {str(status): success}
+    if schemes:
+        responses["401"] = {"description": "Not authenticated"}
+    for code, value in (record.responses or {}).items():
+        responses[str(code)] = _response(value, components)
+    if any(spec.source not in ("request", "depends") for spec in specs) and "422" not in responses:
         responses["422"] = {
             "description": "Validation error",
             "content": {"application/json": {"schema": {"$ref": _REF.format(model="Error")}}},
@@ -200,16 +251,22 @@ def _operation(record: Any, components: dict[str, Any]) -> dict[str, Any]:
 
 
 def openapi_document(
-    app: Any, *, title: str, version: str, description: str | None = None
+    app: Any,
+    *,
+    title: str,
+    version: str,
+    description: str | None = None,
+    servers: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """The OpenAPI 3.1 document of ``app``'s HTTP routes (without WebSockets, the admin and
     routes registered with ``include_in_schema=False``)."""
     components: dict[str, Any] = {}
+    security: dict[str, Any] = {}
     paths: dict[str, Any] = {}
     for record in app.route_records:
         if record.websocket or not record.include_in_schema or record.name.startswith("admin:"):
             continue
-        operation = _operation(record, components)
+        operation = _operation(record, components, security)
         path = _TAIL.sub(r"{\1}", record.path)
         entry = paths.setdefault(path, {})
         for method in record.methods:
@@ -224,8 +281,14 @@ def openapi_document(
     }
     if description:
         document["info"]["description"] = description
+    if servers:
+        document["servers"] = list(servers)
+    if components or security:
+        document["components"] = {}
     if components:
-        document["components"] = {"schemas": components}
+        document["components"]["schemas"] = components
+    if security:
+        document["components"]["securitySchemes"] = security
     return document
 
 

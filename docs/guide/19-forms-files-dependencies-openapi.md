@@ -27,12 +27,19 @@ async def upload(photo: UploadFile, caption: str = Form("")):
 | `await request.form()` | every field: `str` values and `UploadFile`s (`form.files`) |
 | `upload.filename` / `raw_filename` | last path component with unsafe characters replaced / as sent |
 | `upload.content_type`, `size`, `headers` | as sent by the client — check the content yourself |
-| `await upload.read()`, `upload.file` | the bytes / a binary file object |
-| `await upload.save(path, overwrite=False)` | writes in a worker thread; refuses to replace a file |
+| `await upload.read()` | the whole content, in memory |
+| `async for chunk in upload.chunks()` | the content in 1 MiB pieces |
+| `upload.file` | a seekable binary file object reading in pieces |
+| `await upload.save(path, overwrite=False)` | writes in pieces in a worker thread; refuses to replace a file |
 
-- The body is read into memory up to the route's `max_body_size` (default: the app-wide 1 MiB),
-  so the file is complete when the handler runs; larger bodies get `413`. For very large files,
-  upload straight to object storage with a pre-signed URL.
+- The body is read completely, up to the route's `max_body_size` (default: the app-wide
+  1 MiB), so the file is complete when the handler runs; larger bodies get `413`.
+- A body over 1 MiB is written to an unnamed temporary file as it arrives (in `TMPDIR` /
+  `TEMP`) and memory-mapped, not held in process memory; an `UploadFile` is a view of its part.
+  Use `save()`, `chunks()` or `file` for large files — `read()` and `request.body()` copy
+  everything into memory. The file disappears with the request. Give the temporary directory
+  room for `max_body_size` times the concurrent uploads. For files of gigabytes, upload
+  straight to object storage with a pre-signed URL.
 - A Pydantic body parameter also accepts a multipart body (its text fields).
 - Malformed multipart bodies get `400`; more than 1,000 parts or a part header over 16 KiB is
   refused.
@@ -78,6 +85,66 @@ async def orders(
   handler), and WebSocket handlers do not take `Depends`.
 - Ruff/flake8-bugbear: add `extend-immutable-calls = ["ferro.Depends", "ferro.Form",
   "ferro.Header", "ferro.Cookie"]`, as for FastAPI.
+
+### Overriding dependencies in tests
+
+```python
+app.dependency_overrides[current_user] = lambda: fake_user     # until removed
+
+with app.override_dependency(database, fake_database):          # inside the block only
+    response = client.get("/notes")
+```
+
+Overrides apply at request time to every route, including dependencies used by other
+dependencies; the replacement's own parameters are read from the request like any dependency.
+
+### One transaction per request
+
+```python
+from ferro.db import request_transaction
+
+
+@app.post("/orders")
+async def place(data: OrderIn, _=Depends(request_transaction)):
+    order = await Order.objects.create(...)
+    await OrderLine.objects.bulk_create(...)
+    return order
+```
+
+The handler's queries (and those of dependencies listed after it) run in one transaction: it
+commits when the handler returned and rolls back when it raised, `HTTPException` included.
+Background tasks start after the commit. A request-scoped service is a generator dependency:
+it is created once per request (cached), shared by every dependency that asks for it, and
+cleaned up when the handler returned.
+
+### Security schemes
+
+```python
+from ferro.security import APIKeyHeader, HTTPBearer
+
+bearer = HTTPBearer(bearer_format="JWT")
+
+
+async def current_user(token: str = Depends(bearer)) -> User:
+    user = await User.objects.filter(api_token=token).first()
+    if user is None:
+        raise HTTPException(401, "Invalid token", headers={"WWW-Authenticate": "Bearer"})
+    return user
+```
+
+| Scheme | Gives | Reads |
+|---|---|---|
+| `HTTPBearer(bearer_format=None)` | the token | `Authorization: Bearer <token>` |
+| `HTTPBasic(realm=None)` | `(username, password)` | `Authorization: Basic ...` (HTTPS only) |
+| `APIKeyHeader(name=...)` | the key | a header |
+| `APIKeyQuery(name=...)` | the key | a query parameter (logged by proxies: prefer a header) |
+| `APIKeyCookie(name=...)` | the key | a cookie |
+
+A missing credential is `401` (with `WWW-Authenticate` for the HTTP schemes) unless
+`auto_error=False`, which gives `None`. The schemes only read credentials; checking them is
+your dependency's job. Every scheme a route uses (directly or through dependencies) appears in
+its OpenAPI `security`, and routes guarded by `login_required`, `staff_required` or
+`permission_required` list the `sessionid` cookie.
 
 ## Background tasks
 
@@ -152,10 +219,30 @@ async def create_item(data: ItemIn, dry_run: bool = False) -> ItemOut:
 The document (OpenAPI 3.1) lists every HTTP route except WebSockets, the admin and routes with
 `include_in_schema=False`: path, query, header and cookie parameters with their types and
 defaults, Pydantic bodies (JSON or form), form fields and uploads (`multipart/form-data`),
-Pydantic return annotations as response schemas, and the `422` error format. `/docs` loads
+Pydantic return annotations as response schemas, security schemes, and the `422` error
+format. `/docs` loads
 Swagger UI from jsDelivr under a restrictive Content-Security-Policy; pass `docs_path=None` to
 serve only the JSON, and put the docs behind authentication or leave them out in production if
 your API is private.
+
+Route options describe an operation further (and `status_code` also sets the response):
+
+```python
+@app.post(
+    "/items",
+    status_code=201,                         # for results that are not Response objects
+    summary="Create an item",                # else the docstring's first line
+    description="Stores a new item.",        # else the rest of the docstring
+    responses={409: "Already exists", 404: {"description": "No shop", "model": Problem}},
+    deprecated=True,
+    operation_id="createItem",
+    tags=["items"],
+)
+async def create_item(data: ItemIn) -> ItemOut: ...
+```
+
+A handler that returns a `Response` keeps its own status. `status_code=204` sends no body.
+`app.add_openapi(servers=[{"url": "https://api.example.com"}])` lists servers.
 
 ## Templates
 

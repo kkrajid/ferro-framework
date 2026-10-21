@@ -2,7 +2,8 @@
 //! a fixed table of atomic words in a memory-mapped file, used for rate limits.
 //!
 //! This is the only Ferro crate with `unsafe` code: mapping the file and viewing it as atomic
-//! words. Every other crate forbids `unsafe`.
+//! words, and mapping the temporary file of a large request body ([`MappedFile`], Feature 026).
+//! Every other crate forbids `unsafe`.
 //!
 //! Rate limits use GCRA (the generic cell rate algorithm): a client's whole state is one
 //! "theoretical arrival time" (TAT), so a request is one compare-and-swap on one word, and no
@@ -285,5 +286,31 @@ impl RateTable {
                 current != 0 && unpack(current).1 > now
             })
             .count()
+    }
+}
+
+/// A read-only map of a private temporary file (a spooled request body, Feature 026), with the
+/// file it maps. Fields drop in order: unmap, then close.
+#[derive(Debug)]
+pub struct MappedFile {
+    map: memmap2::Mmap,
+    _file: File,
+}
+
+impl MappedFile {
+    /// Maps `file`, which must be an unnamed temporary file only this process writes, and which
+    /// is no longer written: nothing can then change or truncate it under the map. An empty
+    /// file cannot be mapped (an error).
+    pub fn map_private(file: File) -> io::Result<Self> {
+        // SAFETY: the caller guarantees the file is private to this process and no longer
+        // written, so the mapped bytes cannot change while the map exists.
+        let map = unsafe { memmap2::Mmap::map(&file)? };
+        Ok(Self { map, _file: file })
+    }
+}
+
+impl AsRef<[u8]> for MappedFile {
+    fn as_ref(&self) -> &[u8] {
+        &self.map
     }
 }

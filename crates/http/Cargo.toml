@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ferro-core.workspace = true
 ferro-router.workspace = true
+ferro-shared.workspace = true
 # `rustls-0_23` brings HTTP/2 (offered over TLS through ALPN).
 actix-web = { workspace = true, features = ["rustls-0_23"] }
 actix-rt.workspace = true
@@ -20,7 +21,9 @@ rustls.workspace = true
 rustls-pki-types.workspace = true
 serde_json.workspace = true
 socket2.workspace = true
-tokio = { workspace = true, features = ["macros"] }
+tempfile.workspace = true
+# `rt`: spooled request bodies are written off the event loop (Feature 026).
+tokio = { workspace = true, features = ["macros", "rt"] }
 tracing.workspace = true
 
 [lints]
@@ -28,5 +31,4 @@ workspace = true
 
 [dev-dependencies]
 rcgen.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["time"] }

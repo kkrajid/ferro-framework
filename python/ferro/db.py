@@ -26,6 +26,7 @@ __all__ = [
     "fetch",
     "is_connected",
     "on_commit",
+    "request_transaction",
     "reset_sequences",
     "transaction",
 ]
@@ -140,6 +141,19 @@ async def fetch(sql: str, params: Iterable[Any] = ()) -> list[dict[str, Any]]:
     back in plain form (numbers, text — dates and times as ISO text, JSON as text); use
     ``Model.objects.raw()`` for model instances."""
     return await _ferro.raw_fetch(sql, list(params))
+
+
+async def request_transaction() -> Any:
+    """A dependency running the whole request in one ``transaction()`` (Feature 026)::
+
+        @app.post("/orders")
+        async def place(data: OrderIn, _=Depends(request_transaction)): ...
+
+    Every ORM query of the handler (and of dependencies that run after it) joins the
+    transaction; it commits when the handler returned and rolls back when it raised, including
+    ``HTTPException``. Background tasks run after the commit."""
+    async with transaction():
+        yield
 
 
 async def reset_sequences(

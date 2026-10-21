@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import Executor
 from dataclasses import dataclass
 from typing import Any, NamedTuple, TypeVar
@@ -32,6 +33,7 @@ def check_rate_limit(text: str, where: str) -> str:
 
 
 _METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+_NOTHING = object()
 
 
 class RouteInfo(NamedTuple):
@@ -55,6 +57,13 @@ class RouteRecord:
     #: Listed in the OpenAPI document (Feature 025).
     include_in_schema: bool = True
     tags: tuple[str, ...] = ()
+    #: OpenAPI metadata (Feature 026).
+    summary: str | None = None
+    description: str | None = None
+    status_code: int | None = None
+    responses: Any = None
+    deprecated: bool = False
+    operation_id: str | None = None
 
 
 def _qualified_name(handler: Callable[..., Any]) -> str:
@@ -175,6 +184,9 @@ class App:
             import ferro.cache.models  # noqa: F401
         self._routes: list[RouteRecord] = []
         self._middleware: list[Middleware] = []
+        #: ``{dependency: replacement}``: dependencies to replace at request time, for tests
+        #: (Feature 026).
+        self.dependency_overrides: dict[Callable[..., Any], Callable[..., Any]] = {}
         self._startup: list[Callable[[], Any]] = []
         self._shutdown: list[Callable[[], Any]] = []
         self._executor: Executor | None = None
@@ -243,6 +255,12 @@ class App:
         max_body_size: int | None = None,
         include_in_schema: bool = True,
         tags: Iterable[str] = (),
+        summary: str | None = None,
+        description: str | None = None,
+        status_code: int | None = None,
+        responses: dict[int | str, Any] | None = None,
+        deprecated: bool = False,
+        operation_id: str | None = None,
     ) -> Callable[[H], H]:
         """Registers a handler for ``path`` and ``methods``. Returns the handler unchanged.
 
@@ -251,7 +269,18 @@ class App:
         ``max_body_size`` (bytes) replaces the app-wide body limit, for uploads;
         ``include_in_schema=False`` leaves it out of the OpenAPI document; ``tags`` group it
         there. A path's last segment may be ``{name:path}``: the rest of the path.
+
+        ``status_code`` is the status of results that are not ``Response`` objects (``201``
+        for creations); ``summary``, ``description``, ``responses`` (``{404: "Not found"}`` or
+        ``{404: {"description": ..., "model": ErrorModel}}``), ``deprecated`` and
+        ``operation_id`` describe the route in the OpenAPI document.
         """
+        if status_code is not None and (
+            isinstance(status_code, bool)
+            or not isinstance(status_code, int)
+            or not 100 <= status_code <= 599
+        ):
+            raise ConfigurationError(f"route {path!r}: invalid status_code {status_code!r}")
         normalized = _normalize_methods(path, methods)
         if rate_limit is not None:
             rate_limit = check_rate_limit(rate_limit, f"route {path!r}")
@@ -275,7 +304,14 @@ class App:
                     f"route {path!r}: handler must be callable, got {handler!r}"
                 )
             handler_name = name or _qualified_name(handler)
-            endpoint = build_endpoint(handler, params, handler_name, self._get_executor)
+            endpoint = build_endpoint(
+                handler,
+                params,
+                handler_name,
+                self._get_executor,
+                self.dependency_overrides,
+                status_code,
+            )
             self._routes.append(
                 RouteRecord(
                     normalized,
@@ -288,6 +324,12 @@ class App:
                     max_body_size=max_body_size,
                     include_in_schema=include_in_schema,
                     tags=tags,
+                    summary=summary,
+                    description=description,
+                    status_code=status_code,
+                    responses=responses,
+                    deprecated=deprecated,
+                    operation_id=operation_id,
                 )
             )
             return handler
@@ -385,6 +427,25 @@ class App:
             serve_static
         )
 
+    @contextlib.contextmanager
+    def override_dependency(
+        self, dependency: Callable[..., Any], replacement: Callable[..., Any]
+    ) -> Iterator[None]:
+        """Replaces ``dependency`` with ``replacement`` inside the block (tests)::
+
+        with app.override_dependency(current_user, lambda: fake_user):
+            ...
+        """
+        previous = self.dependency_overrides.get(dependency, _NOTHING)
+        self.dependency_overrides[dependency] = replacement
+        try:
+            yield
+        finally:
+            if previous is _NOTHING:
+                self.dependency_overrides.pop(dependency, None)
+            else:
+                self.dependency_overrides[dependency] = previous
+
     def url_for(self, name: str, /, **params: Any) -> str:
         """The path of the route named ``name`` with its path parameters filled in; other
         ``params`` become the query string. ``url_for("product", id=7, ref="mail")`` →
@@ -415,6 +476,7 @@ class App:
         description: str | None = None,
         path: str = "/openapi.json",
         docs_path: str | None = "/docs",
+        servers: list[dict[str, str]] | None = None,
     ) -> None:
         """Serves an OpenAPI 3.1 document of the routes at ``path`` and Swagger UI at
         ``docs_path`` (``None``: no page). Parameters, Pydantic bodies and response models,
@@ -427,7 +489,7 @@ class App:
         async def openapi() -> Any:
             if "document" not in cached:
                 cached["document"] = openapi_document(
-                    self, title=title, version=version, description=description
+                    self, title=title, version=version, description=description, servers=servers
                 )
             return JSONResponse(cached["document"])
 

@@ -11,9 +11,15 @@ async def avatar(photo: UploadFile, caption: str = Form("")):
     await photo.save(MEDIA / f"{uuid4().hex}.img")
 ```
 
-Bodies are read into memory up to the route's ``max_body_size`` (1 MiB by default), so a file
-is already complete when the handler runs. Never trust ``filename`` or ``content_type``: they
-come from the client. ``filename`` keeps only the last path component.
+Bodies are read completely, up to the route's ``max_body_size`` (1 MiB by default), before the
+handler runs, so a file is already complete. A body over 1 MiB is kept in a temporary file
+(in the system's temporary directory) rather than in memory, and an ``UploadFile`` is a view
+of its part of that file (Feature 026): ``save()``, ``chunks()`` and ``file`` read it in pieces;
+``await read()`` copies all of it into memory. The temporary file is deleted when the request
+and its upload objects are gone.
+
+Never trust ``filename`` or ``content_type``: they come from the client. ``filename`` keeps
+only the last path component.
 """
 
 from __future__ import annotations
@@ -21,11 +27,14 @@ from __future__ import annotations
 import asyncio
 import io
 import os
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
 __all__ = ["FormData", "UploadFile"]
+
+#: Piece size of ``save()``, ``chunks()`` and ``file`` reads.
+CHUNK_SIZE = 1024 * 1024
 
 _UNSAFE = {chr(c) for c in range(32)} | {"\x7f", "/", "\\", ":", "*", "?", '"', "<", ">", "|"}
 
@@ -49,7 +58,7 @@ class UploadFile:
         filename: str,
         content_type: str | None,
         headers: list[tuple[str, str]],
-        data: bytes,
+        data: Any,
     ) -> None:
         self.field = field
         #: As the client sent it (may contain a path); for display, never for storage paths.
@@ -59,31 +68,54 @@ class UploadFile:
         #: As the client declared it (``None`` when absent): check the content yourself.
         self.content_type = content_type
         self.headers = headers
+        #: ``bytes``, or a ``ferro._ferro.BodySlice`` view of the request body.
         self._data = data
 
     @property
     def size(self) -> int:
         return len(self._data)
 
+    def _piece(self, offset: int, size: int = -1) -> bytes:
+        if isinstance(self._data, bytes):
+            end = None if size < 0 else offset + size
+            return self._data[offset:end]
+        return self._data.read(offset, size)
+
     async def read(self) -> bytes:
-        """The file's content."""
-        return self._data
+        """The whole content, in memory (for a large file prefer ``save()`` or ``chunks()``)."""
+        if isinstance(self._data, bytes):
+            return self._data
+        return await asyncio.get_running_loop().run_in_executor(None, self._piece, 0)
+
+    async def chunks(self, size: int = CHUNK_SIZE) -> AsyncIterator[bytes]:
+        """The content in pieces of up to ``size`` bytes::
+
+        async for chunk in photo.chunks():
+            digest.update(chunk)
+        """
+        if size <= 0:
+            raise ValueError("chunk size must be positive")
+        loop = asyncio.get_running_loop()
+        for offset in range(0, self.size, size):
+            yield await loop.run_in_executor(None, self._piece, offset, size)
 
     @property
-    def file(self) -> io.BytesIO:
-        """A new binary file object over the content (for libraries that want one)."""
-        return io.BytesIO(self._data)
+    def file(self) -> io.BufferedReader:
+        """A new seekable binary file object over the content (for libraries that want one),
+        reading it in pieces."""
+        return io.BufferedReader(_Reader(self), CHUNK_SIZE)
 
     async def save(self, path: str | os.PathLike[str], *, overwrite: bool = False) -> Path:
-        """Writes the content to ``path`` (in a worker thread) and returns it. An existing file
-        is an error unless ``overwrite=True``. Choose ``path`` yourself — not from
-        ``filename``, which the client controls."""
+        """Writes the content to ``path`` (in a worker thread, in pieces) and returns it. An
+        existing file is an error unless ``overwrite=True``. Choose ``path`` yourself — not
+        from ``filename``, which the client controls."""
         target = Path(path)
         mode = "wb" if overwrite else "xb"
 
         def write() -> None:
             with open(target, mode) as handle:
-                handle.write(self._data)
+                for offset in range(0, self.size, CHUNK_SIZE):
+                    handle.write(self._piece(offset, CHUNK_SIZE))
 
         await asyncio.get_running_loop().run_in_executor(None, write)
         return target
@@ -93,6 +125,40 @@ class UploadFile:
             f"UploadFile(field={self.field!r}, filename={self.filename!r}, "
             f"content_type={self.content_type!r}, size={self.size})"
         )
+
+
+class _Reader(io.RawIOBase):
+    """A raw, seekable reader over an :class:`UploadFile`."""
+
+    def __init__(self, upload: UploadFile) -> None:
+        self._upload = upload
+        self._position = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        view = memoryview(buffer).cast("B")
+        piece = self._upload._piece(self._position, len(view))
+        view[: len(piece)] = piece
+        self._position += len(piece)
+        return len(piece)
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._position, io.SEEK_END: self._upload.size}
+        if whence not in base:
+            raise ValueError(f"invalid whence {whence!r}")
+        position = base[whence] + offset
+        if position < 0:
+            raise ValueError("negative seek position")
+        self._position = position
+        return position
+
+    def tell(self) -> int:
+        return self._position
 
 
 class FormData:

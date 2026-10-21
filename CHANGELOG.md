@@ -26,6 +26,20 @@ Follow-up review of Features 018–020 ([docs/security-audit.md](docs/security-a
 
 ### Added
 
+- APIs, dependencies, uploads and jobs (Feature 026):
+  - `app.dependency_overrides` and `app.override_dependency()` for tests;
+    `ferro.db.request_transaction` (one transaction per request, as a dependency);
+  - security schemes in `ferro.security`: `HTTPBearer`, `HTTPBasic`, `APIKeyHeader`,
+    `APIKeyQuery`, `APIKeyCookie`, listed in the OpenAPI document with the session cookie of
+    `login_required`;
+  - route options `status_code`, `summary`, `description`, `responses`, `deprecated`,
+    `operation_id`; `add_openapi(servers=...)`;
+  - request bodies over 1 MiB are kept in a temporary file (memory-mapped) instead of memory;
+    `UploadFile.chunks()`, a seekable `UploadFile.file` and `save()` read in pieces;
+  - `ferro.jobs`: durable jobs in the database (`@jobs.task`, transactional `enqueue`,
+    retries with backoff, timeouts, visibility timeout) and `ferro jobs worker`;
+  - `.github/workflows/benchmark.yml`: the FastAPI/Flask comparison on a GitHub runner from a
+    release build with pinned versions (uvloop), with hardware and p50/p90/p99/p99.9.
 - Requests and responses at FastAPI/Flask level (Feature 025):
   - file uploads: `UploadFile` parameters, `multipart/form-data` in `request.form()`,
     per-route `max_body_size`, `TestClient(files=...)`;

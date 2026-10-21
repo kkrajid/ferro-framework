@@ -228,15 +228,18 @@ def test_every_worker_uses_the_same_database(tmp_path):
     process, base = start(tmp_path, "--processes", "2", source=DATABASE_APP)
     try:
         wait_ready(base, process, path="/visits")
+        # One worker answering does not mean the other is ready: a connection the kernel hands
+        # to a worker still importing the app waits for it (a 10 s read timed out once on a
+        # macOS runner). The timeouts cover a slow start.
         # A new connection per request: a kept-alive connection stays with one worker.
         with ThreadPoolExecutor(8) as pool:
             writers = set(
                 pool.map(
-                    lambda _: httpx.post(f"{base}/visits", timeout=10).json()["pid"], range(40)
+                    lambda _: httpx.post(f"{base}/visits", timeout=60).json()["pid"], range(40)
                 )
             )
             readers = list(
-                pool.map(lambda _: httpx.get(f"{base}/visits", timeout=10).json(), range(40))
+                pool.map(lambda _: httpx.get(f"{base}/visits", timeout=60).json(), range(40))
             )
             # The kernel decides which worker accepts a connection (macOS can favour one for
             # a while): keep reading until both have answered.
@@ -244,7 +247,7 @@ def test_every_worker_uses_the_same_database(tmp_path):
                 if len(writers | {r["pid"] for r in readers}) >= 2:
                     break
                 readers += pool.map(
-                    lambda _: httpx.get(f"{base}/visits", timeout=10).json(), range(30)
+                    lambda _: httpx.get(f"{base}/visits", timeout=60).json(), range(30)
                 )
     finally:
         interrupt(process)

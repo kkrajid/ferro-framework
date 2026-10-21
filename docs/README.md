@@ -43,8 +43,10 @@ server — no Gunicorn, Uvicorn or Daphne needed.
 14. [Signals, on_commit and lifecycle hooks](guide/18-signals-and-hooks.md) — react to saves,
     logins and requests; side effects after commit; startup and shutdown
 15. [Forms, files, dependencies and API docs](guide/19-forms-files-dependencies-openapi.md) —
-    uploads, `Depends`, background tasks, file and static responses, `url_for`, OpenAPI/Swagger,
-    templates
+    uploads, `Depends`, overrides, request transactions, security schemes, background tasks,
+    file and static responses, `url_for`, OpenAPI/Swagger, templates
+16. [Durable background jobs](guide/20-jobs.md) — `ferro.jobs`: tasks in the database,
+    transactional enqueue, retries, workers
 
 ## Running in production
 

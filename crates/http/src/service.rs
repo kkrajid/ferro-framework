@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use actix_web::http::StatusCode;
 use actix_web::http::header::{HeaderName, HeaderValue};
 use actix_web::{HttpRequest, HttpResponse, web};
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use ferro_core::security::Policy;
 use ferro_core::security::cors::Preflight;
 use ferro_core::{Dispatcher, ErrorEnvelope, FerroRequest, FerroResponse, Method, request_id};
@@ -79,6 +79,8 @@ fn host(req: &HttpRequest) -> Option<&str> {
 enum BodyError {
     TooLarge,
     Incomplete,
+    /// The temporary file of a large body could not be written.
+    Storage(std::io::Error),
 }
 
 /// What routing produced: a response to send, or a connection already upgraded to WebSocket.
@@ -480,6 +482,16 @@ async fn route(
                         .with_message("Request body could not be read");
                     return (Reply::Ferro(envelope.into_response()), true, Some(route_id));
                 }
+                Ok(Err(BodyError::Storage(error))) => {
+                    tracing::error!(
+                        target: "ferro.server",
+                        request_id = %request_id,
+                        "could not store a large request body on disk: {error}"
+                    );
+                    let envelope = ErrorEnvelope::new(500, request_id)
+                        .with_message("Request body could not be stored");
+                    return (Reply::Ferro(envelope.into_response()), true, Some(route_id));
+                }
             };
             let request = FerroRequest {
                 route_id,
@@ -547,15 +559,16 @@ async fn read_body(
     if declared.is_some_and(|len| len > limit) {
         return Err(BodyError::TooLarge);
     }
-    let mut body = BytesMut::with_capacity(declared.unwrap_or(0));
+    let mut body = crate::spool::Collector::new(declared, crate::spool::SPOOL_AFTER)
+        .map_err(BodyError::Storage)?;
     while let Some(chunk) = payload.next().await {
         let chunk = chunk.map_err(|_| BodyError::Incomplete)?;
         if body.len() + chunk.len() > limit {
             return Err(BodyError::TooLarge);
         }
-        body.extend_from_slice(&chunk);
+        body.push(&chunk).await.map_err(BodyError::Storage)?;
     }
-    Ok(body.freeze())
+    body.finish().await.map_err(BodyError::Storage)
 }
 
 fn into_http(
