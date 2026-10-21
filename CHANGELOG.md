@@ -6,6 +6,12 @@ and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 
 
 ## [Unreleased]
 
+## [0.6.0rc1] — 2026-10-21
+
+First release candidate of 0.6: APIs, dependencies, uploads and jobs (Feature 026), requests
+and responses at FastAPI/Flask level (025), signals (024), site security (023), ORM (022) and
+database (021) completeness, and the emSign CA security fix.
+
 ### Security
 
 - **eMudhra/emSign CA key compromise** (RUSTSEC-2026-0381): PostgreSQL TLS no longer trusts
