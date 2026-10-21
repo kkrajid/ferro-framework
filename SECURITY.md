@@ -4,7 +4,8 @@
 
 | Version | Security fixes |
 |---|---|
-| 0.5.x | yes |
+| 0.6.x | yes |
+| 0.5.x | until 0.6.0 is released |
 | older | no (development versions, never published) |
 
 ## Reporting a vulnerability

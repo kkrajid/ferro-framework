@@ -1,0 +1,44 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security problems: please use private reporting instead (see SECURITY.md).
+  - type: input
+    id: version
+    attributes:
+      label: Ferro version
+      description: Output of `ferro --version`
+      placeholder: Ferro 0.6.0rc2
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS, Python version, database
+      placeholder: Ubuntu 24.04, CPython 3.13, PostgreSQL 17
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Smallest code that shows the problem
+      description: An app.py and the request or command you ran.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The response, error message or traceback (`ferro dev` shows tracebacks).
+    validations:
+      required: true

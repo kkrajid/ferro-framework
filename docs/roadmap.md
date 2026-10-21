@@ -26,6 +26,12 @@ on the ones above it. Source sections refer to [product-vision.md](product-visio
 | 018 | Real-time: WebSockets, streaming responses and server-sent events, broadcast (memory, PostgreSQL LISTEN/NOTIFY) | §12, §14, §23 v1.0 (dashboards, SaaS) | next | Implemented ([specs/018-websockets-streaming](../specs/018-websockets-streaming/)) |
 | 019 | Pydantic integration: model-annotated request bodies, response models from return annotations, models in every JSON output | §5, §12, §23 v1.0 (REST apps) | next | Implemented ([specs/019-pydantic-integration](../specs/019-pydantic-integration/)) |
 | 020 | DB latency: debug-build warning, BEGIN pipelined with the first statement, checkout benchmark and profile | §20 | next | Implemented ([specs/020-db-latency](../specs/020-db-latency/)) |
+| 021 | Database completeness: isolation levels, connection lifetimes, `RunSQL`/`RunPython`, extensions, `iterator()`, sequence reset | §9, §11 | v0.6 | Implemented ([specs/021-database-completeness](../specs/021-database-completeness/)) |
+| 022 | ORM completeness: more lookups, JSON and date queries, expressions, subqueries, raw SQL | §7–8 | v0.6 | Implemented ([specs/022-orm-completeness](../specs/022-orm-completeness/)) |
+| 023 | Site security: allowed hosts, HTTPS redirect, HSTS options, login throttling | §15 | v0.6 | Implemented ([specs/023-site-security](../specs/023-site-security/)) |
+| 024 | Signals and hooks: model, request and login signals, `on_commit`, startup/shutdown | §12 | v0.6 | Implemented ([specs/024-signals-and-hooks](../specs/024-signals-and-hooks/)) |
+| 025 | Requests and responses at FastAPI/Flask level: uploads, `Form`/`Header`/`Cookie`/`Depends`, background tasks, files, static, OpenAPI, templates | §12–14 | v0.6 | Implemented ([specs/025-requests-responses](../specs/025-requests-responses/)) |
+| 026 | APIs, uploads and jobs: dependency overrides, OpenAPI security, uploads on disk, durable jobs, benchmark workflow | §12, §20 | v0.6 | Implemented ([specs/026-apis-uploads-jobs](../specs/026-apis-uploads-jobs/)) |
 
 Reordered on 2026-10-10 at the user's request: PostgreSQL and migrations come before relations,
 so migrations are built and tested on both databases from the start (constitution VII).

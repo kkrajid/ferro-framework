@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/kkrajid/ferro-framework/security/advisories/new
+    about: Please report security problems privately, not as a public issue.
+  - name: Documentation
+    url: https://github.com/kkrajid/ferro-framework/blob/main/docs/README.md
+    about: The user guide, deployment guide and reference.

@@ -18,19 +18,13 @@ You write ordinary Python (models, routes, handlers). Ferro runs them on a Rust 
 HTTP handling, routing, limits, JSON encoding and error handling all happen in Rust. You don't
 need to know Rust to use it.
 
-> Status: **0.5.0 release candidate** (alpha quality). Implemented: runtime core (001), Ferro's
-> own ORM (002) on SQLite and PostgreSQL (003), Django-style migrations (004), relations,
-> transactions and aggregation (005), middleware and security defaults (006), authentication
-> (007), admin (008), CLI and project generator (009), multi-process serving (010), production
-> hardening (011), the MVP acceptance shop [examples/ecommerce](examples/ecommerce/) (012),
-> `select_for_update`, custom link models and abstract models (013), TLS and HTTP/2 (014),
-> rate limits and metrics shared across processes plus `ferro.cache` (015), wheels and a release
-> workflow (016), and the release-candidate work — security review, API freeze, deployment
-> guide (017); since then WebSockets, server-sent events and streaming with broadcast across
-> processes (018), Pydantic models for bodies and responses (019). See the [roadmap](docs/roadmap.md) and the [changelog](CHANGELOG.md).
+> Status: **0.6.0 release candidate** (alpha quality: a young project built by one person; try
+> it, but do not bet production on it yet). The public API is frozen within a minor version
+> ([stability policy](docs/stability.md)). See the [roadmap](docs/roadmap.md) and the
+> [changelog](CHANGELOG.md).
 
 ```bash
-pip install ferro-framework   # once published; wheels for Linux, macOS and Windows, Python 3.12+
+pip install --pre ferro-framework   # wheels for Linux, macOS and Windows; CPython 3.12+
 ```
 
 ## Start a project
@@ -100,6 +94,40 @@ curl http://127.0.0.1:8000/
   `ferro.broadcast` to reach sockets in every process and machine through PostgreSQL
 - Pydantic models as request bodies and response models (`async def create(data: ProductIn)
   -> ProductOut`), validation errors as 422 with every problem listed
+- FastAPI-style parameters: `Form`, `Header`, `Cookie`, `Depends` (nested, cached per request,
+  generator cleanup, `app.dependency_overrides` for tests), `BackgroundTasks`
+- Automatic OpenAPI 3.1 and Swagger UI (`app.add_openapi()`) with security schemes
+  (`HTTPBearer`, `APIKeyHeader`, ...), `status_code`, `summary`, `responses` and tags
+- File uploads (`UploadFile`; bodies over 1 MiB go to a temporary file, not memory),
+  `FileResponse` with ranges and ETags, static files, `HTMLResponse`/`RedirectResponse`,
+  Jinja2 templates, `app.url_for()`
+- `ferro.jobs`: durable background jobs stored in your database, enqueued in your transaction,
+  retried with backoff, run by `ferro jobs worker`
+- Signals (`pre_save`, `post_save`, `m2m_changed`, request and login signals), `on_commit`,
+  startup/shutdown hooks; `db.request_transaction` for one transaction per request
+- More ORM: JSON key queries, date transforms, regex lookups, `Case`/`When`, subqueries,
+  `distinct`, `get_or_create`, `iterator()`, raw SQL with bound parameters, isolation levels
+- Site security: `allowed_hosts`, HTTPS redirect, HSTS, login throttling
+
+## Performance
+
+Measured on one Windows laptop (8 logical CPUs), release build, `oha` with 50 connections;
+Ferro with 4 threads in one process, FastAPI on one uvicorn worker (httptools), Flask on
+waitress with 8 threads. Treat these as an indication: client and servers share the machine,
+and uvloop is not available on Windows.
+
+| | Ferro | FastAPI (uvicorn) | Flask (waitress) |
+|---|---|---|---|
+| JSON hello world | 25,208 req/s | 2,685 req/s | 1,965 req/s |
+| Pydantic body | 16,410 req/s | 2,175 req/s | 1,565 req/s |
+| SQLite read | 12,458 req/s | 1,525 req/s | 1,514 req/s |
+| Memory idle → peak under load | 46 → 49 MiB | 59 → 76 MiB | 55 → 56 MiB |
+
+Full tables, latency percentiles and the scripts:
+[throughput](tests/benchmarks/results/025-compare.md),
+[memory](tests/benchmarks/results/026-memory.md). Run the comparison yourself on a fresh Linux
+machine with the [Benchmark workflow](.github/workflows/benchmark.yml) (Actions → Benchmark →
+Run workflow) or locally with `tests/benchmarks/run_025_compare.py` and `run_026_memory.py`.
 
 ## Documentation
 
@@ -113,7 +141,10 @@ curl http://127.0.0.1:8000/
   [cache](docs/guide/08-cache.md), [security](docs/guide/09-security.md),
   [testing](docs/guide/10-testing.md), [logging and metrics](docs/guide/11-logging-monitoring.md),
   [real-time: WebSockets, SSE, streaming](docs/guide/16-realtime.md),
-  [Pydantic models](docs/guide/17-pydantic.md)
+  [Pydantic models](docs/guide/17-pydantic.md),
+  [signals and hooks](docs/guide/18-signals-and-hooks.md),
+  [forms, files, dependencies and OpenAPI](docs/guide/19-forms-files-dependencies-openapi.md),
+  [background jobs](docs/guide/20-jobs.md)
 - Production: [deployment](docs/deployment.md) (Ubuntu server from zero, Docker, Kubernetes,
   PaaS), [performance and scaling](docs/guide/12-performance-scaling.md),
   [troubleshooting](docs/guide/13-troubleshooting.md)
@@ -127,7 +158,7 @@ Requires Rust (stable), [uv](https://docs.astral.sh/uv/) and CPython 3.12+.
 
 ```bash
 uv venv --python 3.13 .venv
-uv pip install --python .venv maturin pytest httpx ruff trustme h2 pydantic
+uv pip install --python .venv --group dev      # maturin, pytest, httpx, ruff, pydantic, ...
 uv run --python .venv maturin develop --uv
 uv run --python .venv pytest
 cargo test --workspace
@@ -137,15 +168,21 @@ cargo test --workspace
 run` warns about it). For benchmarks or serving real traffic from a checkout, use
 `maturin develop --release`.
 
+## Contributing
+
+Contributions are welcome: bug reports, documentation fixes, tests, benchmarks on other
+machines and features. Start with [CONTRIBUTING.md](CONTRIBUTING.md) (setup, tests, checks,
+how a change goes from issue to pull request) and the [code of conduct](CODE_OF_CONDUCT.md).
+Report security problems privately as described in [SECURITY.md](SECURITY.md).
+
 ## How it is built
 
 The project follows spec-driven development with [Spec Kit](https://github.com/github/spec-kit):
 
 - [docs/product-vision.md](docs/product-vision.md): product plan
 - [.specify/memory/constitution.md](.specify/memory/constitution.md): non-negotiable principles
-- [specs/001-runtime-core/](specs/001-runtime-core/) and
-  [specs/002-orm-foundation/](specs/002-orm-foundation/): spec, plan, research, contracts and
-  tasks for each feature
+- [specs/](specs/): one folder per feature (001 to 026), with its spec and, for most, the plan,
+  research, contracts and tasks
 
 ```text
 crates/core           engine-independent types (settings, request/response, error envelope)
@@ -156,7 +193,7 @@ crates/orm            model metadata, query AST, SQL compiler, DDL
 crates/sqlite         SQLite backend (own thread pool)
 crates/postgres       PostgreSQL backend (async driver, pool, TLS)
 crates/migrations     schema state, diff, reversal and SQL for migrations
-crates/shared         state shared by worker processes (rate-limit table; the only unsafe code)
+crates/shared         state shared by worker processes, memory maps (the only unsafe code)
 crates/python-bridge  native module ferro._ferro (asyncio bridge, JSON, ORM bindings)
 python/ferro          the Python API
 ```
