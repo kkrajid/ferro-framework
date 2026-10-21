@@ -75,9 +75,26 @@ pub(crate) fn init_logging(level: &str, format: &str) -> PyResult<()> {
 
 /// Emits a record from Python's `logging` (see `ferro.log.RustHandler`), with the id of the
 /// request being handled when there is one.
+///
+/// The record is written without the interpreter lock: writing to stderr blocks while the
+/// reader of a pipe is behind (a log shipper, a test reading at the end), and holding the lock
+/// then would stop every other Python thread of the worker, its event loop included (Feature
+/// 026: a macOS worker hung this way on its first log line).
 #[pyfunction]
 #[pyo3(signature = (level, logger, message, request_id=None))]
-pub(crate) fn log(level: &str, logger: &str, message: &str, request_id: Option<&str>) {
+pub(crate) fn log(
+    py: Python<'_>,
+    level: &str,
+    logger: &str,
+    message: &str,
+    request_id: Option<&str>,
+) {
+    let (level, logger, message) = (level.to_owned(), logger.to_owned(), message.to_owned());
+    let request_id = request_id.map(str::to_owned);
+    py.detach(move || emit(&level, &logger, &message, request_id.as_deref()));
+}
+
+fn emit(level: &str, logger: &str, message: &str, request_id: Option<&str>) {
     macro_rules! emit {
         ($macro:ident) => {
             match request_id {

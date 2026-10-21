@@ -514,7 +514,10 @@ pub(crate) fn start_socket(
     let attached = Bound::new(py, SocketDone { shared })
         .and_then(|callback| task.call_method1(intern!(py, "add_done_callback"), (callback,)));
     if let Err(err) = attached {
-        tracing::error!(target: "ferro.server", "could not watch socket handler: {err}");
+        let text = err.to_string();
+        py.detach(|| {
+            tracing::error!(target: "ferro.server", "could not watch socket handler: {text}");
+        });
     }
 }
 

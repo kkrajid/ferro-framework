@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -45,14 +46,41 @@ def free_port() -> int:
         return sock.getsockname()[1]
 
 
+class Server(subprocess.Popen):
+    """A server process whose output is read as it comes. Left unread, a pipe fills (macOS pipes
+    can be small) and the next write to it blocks the worker writing it: a worker once hung on
+    its second log line that way. ``communicate()`` returns everything read."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self._output: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        self._readers = [
+            threading.Thread(target=self._read, args=(name,), daemon=True)
+            for name in ("stdout", "stderr")
+        ]
+        for reader in self._readers:
+            reader.start()
+
+    def _read(self, name: str) -> None:
+        stream = getattr(self, name)
+        for line in stream:
+            self._output[name].append(line)
+
+    def communicate(self, input: object = None, timeout: float | None = None) -> tuple[str, str]:
+        self.wait(timeout)
+        for reader in self._readers:
+            reader.join(10)
+        return "".join(self._output["stdout"]), "".join(self._output["stderr"])
+
+
 def start(tmp_path: Path, *args: str, env: dict[str, str] | None = None, source: str = APP):
     (tmp_path / "app.py").write_text(source)
     port = free_port()
     environment = {k: v for k, v in os.environ.items() if not k.startswith("FERRO_")}
     environment.update(env or {})
     flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
-    process = subprocess.Popen(
-        # Warnings only: stderr is a pipe read at the end; access logs would fill it.
+    process = Server(
+        # Warnings only: the output is kept in memory until the test reads it.
         [
             sys.executable,
             "-m",
@@ -309,3 +337,58 @@ def test_workers_exit_when_the_supervisor_dies(tmp_path):
     while time.monotonic() < deadline and any(alive(pid) for pid in seen):
         time.sleep(0.5)
     assert not any(alive(pid) for pid in seen), "orphaned workers stop on their own"
+
+
+LOGGING_APP = """import logging
+import threading
+
+from ferro import App
+
+app = App()
+log = logging.getLogger("app.flood")
+
+
+@app.on_startup
+def flood():
+    # Far more than any pipe holds: the thread blocks on stderr once the pipe is full.
+    def write():
+        for i in range(5000):
+            log.warning("line %d %s", i, "x" * 200)
+
+    threading.Thread(target=write, daemon=True).start()
+
+
+@app.get("/ok")
+async def ok():
+    return {"ok": True}
+"""
+
+
+def test_a_blocked_stderr_does_not_stop_the_worker(tmp_path):
+    """A log write blocked on a full pipe holds no interpreter lock, so the event loop keeps
+    serving (Feature 026: a macOS worker hung on a log line while holding it)."""
+    (tmp_path / "app.py").write_text(LOGGING_APP)
+    port = free_port()
+    environment = {k: v for k, v in os.environ.items() if not k.startswith("FERRO_")}
+    process = subprocess.Popen(
+        [sys.executable, "-m", "ferro", "run", "--port", str(port), "--log-level", "warning"],
+        cwd=tmp_path,
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,  # never read while the server runs
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        answered = 0
+        while time.monotonic() < deadline and answered < 20:
+            try:
+                if httpx.get(f"http://127.0.0.1:{port}/ok", timeout=5).status_code == 200:
+                    answered += 1
+            except httpx.HTTPError:
+                time.sleep(0.2)
+        assert answered == 20, f"the worker stopped serving after {answered} requests"
+    finally:
+        interrupt(process)
+        # Reading now unblocks the logging thread; the server then stops.
+        process.communicate(timeout=60)

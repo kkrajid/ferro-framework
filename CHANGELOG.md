@@ -6,6 +6,13 @@ and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 
 
 ## [Unreleased]
 
+### Fixed
+
+- A worker no longer stops serving while a log line waits for stderr. Log records from Python
+  (and handler errors) were written while holding the interpreter lock, so a pipe its reader
+  had not emptied (a log shipper falling behind; small macOS pipes) blocked the event loop and
+  every request of that worker until the pipe was read; requests got 503 or timed out.
+
 ## [0.6.0rc1] — 2026-10-21
 
 First release candidate of 0.6: APIs, dependencies, uploads and jobs (Feature 026), requests

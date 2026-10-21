@@ -51,12 +51,15 @@ fn from_exception(
     } else if crate::orm_values::orm_types(py).is_ok_and(|orm| is(&orm.database_unavailable_error))
     {
         // An outage, not a bug: no traceback; the database's message stays in the log.
-        tracing::warn!(
-            target: "ferro.handler",
-            request_id = %request_id,
-            handler = %handler,
-            "database unavailable: {value}"
-        );
+        let text = value.to_string();
+        py.detach(|| {
+            tracing::warn!(
+                target: "ferro.handler",
+                request_id = %request_id,
+                handler = %handler,
+                "database unavailable: {text}"
+            );
+        });
         unavailable(request_id)
     } else {
         internal_error(py, Some(&err), None, request_id, handler, debug)
@@ -157,13 +160,16 @@ fn internal_error(
     } else {
         "returned an unusable value:"
     };
-    tracing::error!(
-        target: "ferro.handler",
-        request_id = %request_id,
-        handler = %handler,
-        "handler {handler} {what} {type_name}: {message}\n{}",
-        traceback.join("\n")
-    );
+    // Written without the interpreter lock (a blocked stderr must not stop the worker).
+    py.detach(|| {
+        tracing::error!(
+            target: "ferro.handler",
+            request_id = %request_id,
+            handler = %handler,
+            "handler {handler} {what} {type_name}: {message}\n{}",
+            traceback.join("\n")
+        );
+    });
     let mut envelope = ErrorEnvelope::new(500, request_id);
     if debug {
         envelope = envelope.with_debug(DebugInfo {
@@ -184,13 +190,15 @@ pub(crate) fn log_failure(
     what: &str,
 ) {
     let (type_name, message, traceback) = describe(py, err);
-    tracing::error!(
-        target: "ferro.handler",
-        request_id = %request_id,
-        handler = %handler,
-        "handler {handler} {what}: {type_name}: {message}\n{}",
-        traceback.join("\n")
-    );
+    py.detach(|| {
+        tracing::error!(
+            target: "ferro.handler",
+            request_id = %request_id,
+            handler = %handler,
+            "handler {handler} {what}: {type_name}: {message}\n{}",
+            traceback.join("\n")
+        );
+    });
 }
 
 fn describe(py: Python<'_>, err: &PyErr) -> (String, String, Vec<String>) {

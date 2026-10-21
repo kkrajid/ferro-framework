@@ -311,7 +311,10 @@ impl Executor {
         let attached = Bound::new(py, callback)
             .and_then(|callback| task.call_method1(intern!(py, "add_done_callback"), (callback,)));
         if let Err(err) = attached {
-            tracing::error!(target: "ferro.server", "could not watch handler task: {err}");
+            let text = err.to_string();
+            py.detach(|| {
+                tracing::error!(target: "ferro.server", "could not watch handler task: {text}");
+            });
         }
     }
 }
