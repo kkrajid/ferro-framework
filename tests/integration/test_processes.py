@@ -139,6 +139,17 @@ def pids(base: str, count: int = 300) -> set[int]:
         return set(pool.map(get, range(count)))
 
 
+def several_pids(base: str, want: int = 2, timeout: float = 30) -> set[int]:
+    """Process ids from rounds of :func:`pids`, each round on new connections, until ``want``
+    processes have answered. The kernel picks the process that accepts a connection: macOS can
+    give every connection of a round to one of them (300 requests once all went to one of 3)."""
+    seen: set[int] = set()
+    deadline = time.monotonic() + timeout
+    while len(seen) < want and time.monotonic() < deadline:
+        seen |= pids(base, 100)
+    return seen
+
+
 def alive(pid: int) -> bool:
     if sys.platform == "win32":
         result = subprocess.run(
@@ -156,7 +167,7 @@ def test_workers_share_the_port_restart_and_stop(tmp_path):
     process, base = start(tmp_path, "--processes", "3")
     try:
         wait_ready(base, process)
-        seen = pids(base)
+        seen = several_pids(base)
         assert len(seen) >= 2, f"requests were served by {seen}"
         victim = next(iter(seen))
         os.kill(victim, signal.SIGTERM)
@@ -329,7 +340,7 @@ def test_workers_exit_when_the_supervisor_dies(tmp_path):
     process, base = start(tmp_path, "--processes", "2")
     try:
         wait_ready(base, process)
-        seen = pids(base, 100)
+        seen = several_pids(base)
     finally:
         process.kill()
         process.communicate(timeout=60)
