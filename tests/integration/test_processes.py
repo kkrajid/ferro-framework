@@ -7,7 +7,6 @@ import signal
 import socket
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -97,25 +96,18 @@ def interrupt(process: subprocess.Popen) -> None:
 
 
 def pids(base: str, count: int = 300) -> set[int]:
-    # One keep-alive client per thread: a client shared by 32 threads occasionally failed on
-    # Windows with WinError 10038 (socket closed under another thread), and a new connection
-    # per request timed out on macOS runners.
-    local = threading.local()
-    clients: list[httpx.Client] = []
+    """Process ids answering `count` CPU-bound requests. A fresh connection per request lets
+    every worker accept some (keep-alive connections stay with one worker, and macOS hands most
+    connections of a shared socket to one process); no client is shared between threads (that
+    failed on Windows with WinError 10038). The timeout allows for queued requests on slow CI
+    runners."""
 
     def get(_: int) -> int:
-        client = getattr(local, "client", None)
-        if client is None:
-            client = local.client = httpx.Client(timeout=10)
-            clients.append(client)
-        return client.get(f"{base}/burn").json()["pid"]
+        response = httpx.get(f"{base}/burn", timeout=30, headers={"connection": "close"})
+        return response.json()["pid"]
 
-    try:
-        with ThreadPoolExecutor(32) as pool:
-            return set(pool.map(get, range(count)))
-    finally:
-        for client in clients:
-            client.close()
+    with ThreadPoolExecutor(16) as pool:
+        return set(pool.map(get, range(count)))
 
 
 def alive(pid: int) -> bool:
