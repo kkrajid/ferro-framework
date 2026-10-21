@@ -6,6 +6,10 @@ and versions follow [Semantic Versioning](https://semver.org/) with the pre-1.0 
 
 ## [Unreleased]
 
+## [0.6.0rc2] — 2026-10-21
+
+0.6.0rc1 was tagged but never uploaded: this candidate replaces it with the fix below.
+
 ### Fixed
 
 - A worker no longer stops serving while a log line waits for stderr. Log records from Python

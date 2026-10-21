@@ -39,7 +39,7 @@ pip install "git+https://github.com/kkrajid/ferro-framework"
 or from a wheel file someone built for you:
 
 ```bash
-pip install ferro_framework-0.6.0rc1-cp312-abi3-win_amd64.whl
+pip install ferro_framework-0.6.0rc2-cp312-abi3-win_amd64.whl
 ```
 
 Check it:
@@ -49,7 +49,7 @@ ferro --version
 ```
 
 ```text
-Ferro 0.6.0rc1
+Ferro 0.6.0rc2
 ```
 
 ## Create a project

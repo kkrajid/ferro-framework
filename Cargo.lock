@@ -664,7 +664,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "ferro-core"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "argon2",
  "bytes",
@@ -679,14 +679,14 @@ dependencies = [
 
 [[package]]
 name = "ferro-database"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "async-channel",
 ]
 
 [[package]]
 name = "ferro-http"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "actix-rt",
  "actix-web",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-migrations"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "ferro-database",
  "ferro-orm",
@@ -716,14 +716,14 @@ dependencies = [
 
 [[package]]
 name = "ferro-orm"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "ferro-database",
 ]
 
 [[package]]
 name = "ferro-postgres"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "async-channel",
  "bytes",
@@ -739,7 +739,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-python"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "bytes",
  "ferro-core",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-router"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "ferro-core",
  "percent-encoding",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-shared"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "memmap2",
  "tempfile",
@@ -777,7 +777,7 @@ dependencies = [
 
 [[package]]
 name = "ferro-sqlite"
-version = "0.6.0-rc.1"
+version = "0.6.0-rc.2"
 dependencies = [
  "crossbeam-channel",
  "ferro-database",
