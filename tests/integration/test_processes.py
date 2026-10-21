@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import socket
@@ -188,9 +189,16 @@ def test_workers_failing_at_startup_stop_the_supervisor(tmp_path):
     assert "failed to start" in err
 
 
-DATABASE_APP = """import os
+DATABASE_APP = """import faulthandler
+import os
+import signal
 
 from ferro import App, models
+
+# The test sends SIGUSR1 to the workers when a request hangs: every thread's stack goes to
+# stderr (macOS runners have hung here; the stacks show where).
+if hasattr(signal, "SIGUSR1"):
+    faulthandler.register(signal.SIGUSR1, all_threads=True)
 
 
 class Visit(models.Model):
@@ -217,6 +225,19 @@ async def count():
 """
 
 
+def _dump_worker_stacks(process: subprocess.Popen) -> None:
+    """Asks the supervisor's workers to print their threads' stacks (POSIX)."""
+    if sys.platform == "win32":
+        return
+    children = subprocess.run(
+        ["pgrep", "-P", str(process.pid)], capture_output=True, text=True
+    ).stdout.split()
+    for child in children:
+        with contextlib.suppress(ProcessLookupError, ValueError):
+            os.kill(int(child), signal.SIGUSR1)
+    time.sleep(2)
+
+
 def test_every_worker_uses_the_same_database(tmp_path):
     (tmp_path / "app.py").write_text(DATABASE_APP)
     environment = {k: v for k, v in os.environ.items() if not k.startswith("FERRO_")}
@@ -235,13 +256,28 @@ def test_every_worker_uses_the_same_database(tmp_path):
         # to a worker still importing the app waits for it (a 10 s read timed out once on a
         # macOS runner). The timeouts cover a slow start.
         # A new connection per request: a kept-alive connection stays with one worker.
-        def visit(_: int) -> int:
-            response = httpx.post(f"{base}/visits", timeout=90)
-            assert response.status_code == 200, response.text
+        def visit(_: int) -> int | str:
+            try:
+                response = httpx.post(f"{base}/visits", timeout=90)
+            except httpx.TimeoutException:
+                return "timeout"
+            if response.status_code != 200:
+                return f"{response.status_code} {response.text}"
             return response.json()["pid"]
 
         with ThreadPoolExecutor(8) as pool:
-            writers = set(pool.map(visit, range(40)))
+            outcomes = list(pool.map(visit, range(40)))
+            problems = [o for o in outcomes if isinstance(o, str)]
+            if problems:
+                _dump_worker_stacks(process)
+                interrupt(process)
+                _, err = process.communicate(timeout=60)
+                raise AssertionError(
+                    f"{len(problems)} of 40 writes failed: {problems[:5]}; pids "
+                    f"{sorted({o for o in outcomes if isinstance(o, int)})}\n"
+                    f"server stderr (tail):\n{err[-12000:]}"
+                )
+            writers = set(outcomes)
             readers = list(
                 pool.map(lambda _: httpx.get(f"{base}/visits", timeout=60).json(), range(40))
             )
